@@ -106,8 +106,11 @@ make test       # 运行全部测试
 
 环境说明：本仓库在 Windows（Git Bash）下开发，工具链为
 [w64devkit](https://github.com/skeeto/w64devkit)（GCC 16，位于
-`_tools/w64devkit/`，首次构建时自动下载）。代码同时支持 POSIX 平台
-（`env_posix.c` + pthread）。
+`_tools/w64devkit/`，首次构建时自动下载）。构建系统按编译器目标
+（`gcc -dumpmachine`）自动选择 Env 后端：MinGW 用 `env_win.c`，
+其余环境（Linux / macOS / MSYS2）用 `env_posix.c` + pthread。
+POSIX 后端已在 MSYS2 环境（`pacman -S make gcc` 后直接 `make`）
+构建并跑通全部 92 个用例；原生 Linux/macOS 有待一次实机确认。
 
 ## 测试套件（移植自 LevelDB）
 

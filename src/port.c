@@ -100,10 +100,20 @@ int ldb_atomic_load(ldb_atomic_int* a) {
 }
 
 void ldb_atomic_store_relaxed(ldb_atomic_int* a, int v) {
+#if defined(_WIN32)
   a->value = (LONG)v;
+#else
+  __atomic_store_n(&a->value, v, __ATOMIC_RELAXED);
+#endif
 }
 
-int ldb_atomic_load_relaxed(ldb_atomic_int* a) { return a->value; }
+int ldb_atomic_load_relaxed(ldb_atomic_int* a) {
+#if defined(_WIN32)
+  return (int)a->value;
+#else
+  return __atomic_load_n(&a->value, __ATOMIC_RELAXED);
+#endif
+}
 
 typedef struct thread_arg {
   void (*fn)(void*);

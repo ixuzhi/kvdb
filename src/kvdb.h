@@ -6,6 +6,13 @@
 #ifndef KVDB_KVDB_H_
 #define KVDB_KVDB_H_
 
+#if !defined(_WIN32) && !defined(_GNU_SOURCE)
+// Must precede the system headers below: -std=c11's strict mode hides
+// POSIX declarations (strdup, pread, clock_gettime) otherwise. port.h
+// defines it too for translation units that include port.h directly.
+#define _GNU_SOURCE
+#endif
+
 #include <stdarg.h>
 #include <stddef.h>
 #include <stdint.h>

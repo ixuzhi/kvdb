@@ -13,6 +13,12 @@
 #endif
 #include <windows.h>
 #else
+// -std=c11's strict mode hides POSIX extensions (PTHREAD_MUTEX_RECURSIVE,
+// pthread_mutexattr_settype) behind feature-test macros; request them
+// before any system header.
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 #include <pthread.h>
 #include <sched.h>
 #endif

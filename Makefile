@@ -21,18 +21,23 @@ TEST_SRCS := tests/test_main.c tests/test_util.c tests/test_cache.c \
              tests/test_log.c tests/test_batch.c tests/test_skiplist.c \
              tests/test_table.c tests/test_db.c tests/test_c_api.c
 
+# Pick the Env backend by compiler target, not host OS: MSYS2 runs on
+# Windows but targets the POSIX emulation (no _WIN32, no windows.h).
+# Must run before LIB_OBJS below expands LIB_SRCS.
+TARGET_TRIPLET := $(shell $(CC) -dumpmachine 2>/dev/null)
+ifneq (,$(findstring mingw,$(TARGET_TRIPLET)))
+  LDFLAGS += -static
+else
+  LDFLAGS += -lpthread
+  LIB_SRCS += $(SRCDIR)/env_posix.c
+  CFLAGS += -D_GNU_SOURCE
+endif
+
 LIB_OBJS := $(patsubst $(SRCDIR)/%.c,$(OBJDIR)/%.o,$(LIB_SRCS))
 TEST_OBJS := $(patsubst tests/%.c,$(OBJDIR)/tests/%.o,$(filter tests/%,$(TEST_SRCS)))
 
 LIB := $(BINDIR)/libleveldb.a
 TESTBIN := $(BINDIR)/kvdb_tests
-
-ifeq ($(OS),Windows_NT)
-  LDFLAGS += -static
-else
-  LDFLAGS += -lpthread
-  LIB_SRCS += $(SRCDIR)/env_posix.c
-endif
 
 .PHONY: all clean test
 

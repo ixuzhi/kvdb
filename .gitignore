@@ -1,0 +1,9 @@
+# Build artifacts
+build/
+_tools/
+*.o
+*.a
+*.exe
+
+# Test temp dirs
+leveldbtest-*/

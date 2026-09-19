@@ -75,8 +75,10 @@ fi
 # build at all: MSYS2 ships no libasan/libubsan for gcc on any Windows target,
 # so the failure would otherwise surface minutes later as a link error nobody
 # read. Also has to come before the object-tree wipe below.
+# *msys* is the triple MSYS2's own /usr/bin gcc reports (x86_64-pc-msys); it was
+# missing, so `CC=gcc` from an MSYS shell passed this guard and died in the link.
 case "$TRIPLE" in
-  *cygwin*|*mingw*|*windows*)
+  *cygwin*|*mingw*|*windows*|*msys*)
     if [[ $CC != *clang* ]]; then
       printf '%s: %s targets %s, and no MSYS2 gcc carries a sanitizer runtime.\n' \
              "$0" "$CC" "$TRIPLE" >&2

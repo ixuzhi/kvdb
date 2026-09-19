@@ -11,10 +11,23 @@
 
 | 工具链 | 目标三元组 | 有无 sanitizer 运行时 |
 |---|---|---|
-| MSYS2 gcc 15.2（`MSYSTEM=MSYS`） | `x86_64-pc-cygwin` | 无：MSYS2 不提供 `mingw-w64-x86_64-sanitizers` 这个包，`libasan`/`libubsan` 都拿不到 |
+| MSYS2 gcc 15.2（`MSYSTEM=MSYS`） | ~~`x86_64-pc-cygwin`~~ 本轮实测该层报 `x86_64-pc-msys`，见下方更正 | 无：MSYS2 不提供 `mingw-w64-x86_64-sanitizers` 这个包，`libasan`/`libubsan` 都拿不到 |
 | MinGW64 gcc 16.1（`MSYSTEM=MINGW64`） | `x86_64-w64-mingw32` | 同上 |
+| 独立 Cygwin gcc 14.4（2026-09-20 补） | `x86_64-pc-cygwin` | 无，且是**仓库层面不可能**：`setup.ini` 的 16,087 个包里按名筛 `asan` 命中 0，`/usr/lib` 下无任何 `libasan` |
 | MSYS2 clang 22.1.8（`MSYSTEM=CLANG64`） | `x86_64-w64-windows-gnu` | **有**：`libclang_rt.asan_dynamic-x86_64.dll` 随工具链交付 |
 | 原生 Linux gcc 12.2（Debian 12，2026-09-19 补） | `x86_64-linux-gnu` | **有，且不必换编译器**：`/usr/lib/gcc/x86_64-linux-gnu/12/` 下 `libasan`/`libubsan`/`libtsan` 齐备，`libasan.so.8` 还带 LeakSanitizer |
+
+> **2026-09-20 更正**：这张表原来把 MSYS2 的 msys 层写成 `x86_64-pc-cygwin`。
+> 本机重装后的 MSYS2（gcc 13.3.0 / msys 运行时 3.5.7）里 `/usr/bin/gcc
+> -dumpmachine` 实报 `x86_64-pc-msys`，两种拼法是否同一世代的同一环境已无从
+> 对照（doc/09 W2）。这件事不只是记账错误：`build_official.sh` 与
+> `run_interop.sh` 正是拿 `*-cygwin` 当 POSIX 判据的，于是在这台机器上官方
+> 参考库直接拒绝构建（doc/04 N-7）。判据现已统一成 `*linux*|*-cygwin|*-msys`。
+>
+> 同一天把"Windows 的 gcc 没有 sanitizer 运行时"从推断升级成直接探针：同一份
+> 空程序交给 msys gcc 13.3、w64devkit gcc 16.2、Cygwin gcc 14.4 各试一次
+> `-fsanitize=address,undefined`，三支全部 `cannot find -lasan` / `-lubsan`，
+> 只有 clang 链得上（doc/09 §4.3）。
 
 也就是说这不是"换个编译选项"那么轻：为了让这轮验证可跑，Makefile 必须先能
 正确识别 clang 的目标三元组（见 §3 的 Makefile 改动），否则它会被当成 POSIX
@@ -114,6 +127,7 @@ Windows 上 `DestroyDB` 之后同路径重开报 win32 error 32（共享冲突�
 | `Makefile:6` | 新增 `SANFLAGS` 通道：命令行 `make CFLAGS=…` 会**同时吞掉** Makefile 里的 `+=` 追加（POSIX 分支的 `-D_GNU_SOURCE`、`-lpthread` 会静默消失，`make -n` 可实证），改为在平台分支之后 `+= $(SANFLAGS)` | Windows 分支本来什么都不追加，所以这个覆盖语义在 MSYS2 上从未暴露 |
 | `scripts/run_sanitizers.sh` | `CC` 按宿主自动选（Windows 回归时改为**只有 `*linux*` 才默认 gcc**，其余一律 clang；Windows 三元组配非 clang 的 `CC` 直接 `exit 2`，且这道守卫排在 `rm -rf "$OBJDIR"` 之前，误跑不会毁掉上一次归档）；`-D_GNU_SOURCE` 只加给 `*linux*` 下脚本自己编的 `c_test.o`/`golden_driver.o`；`TMP`/`cygpath` 兜底块收窄到 Windows/cygwin/mingw 目标（POSIX 上原来会退化成 `TMP=.`，把留档写进仓库）；leak 行按平台分别陈述并支持 `SAN_DETECT_LEAKS=1` | 原判据用 `/usr/bin/gcc -dumpmachine` 求值：Git Bash 里该路径没有 gcc（拿到空串→选 gcc），MINGW64 里它又是 cygwin 目标（三元组不含 `mingw`），两条都会挑中一个没有 sanitizer runtime 的编译器。详见 doc/08 §8.3 |
 | `scripts/build_official.sh`、`scripts/run_interop.sh` | 编译器断言从"必须 `x86_64-pc-cygwin`"放宽为 `*-cygwin` 或 `*linux*`；`KVDB` 路径可 `KVDB_LIB=` 覆盖 | 旧断言让 Linux 上连参考库都拒绝构建 |
+| `scripts/build_official.sh`、`scripts/run_interop.sh`、`scripts/run_golden.sh`、`scripts/run_sanitizers.sh` | **2026-09-20 再放宽一次**：POSIX 判据补 `*-msys`；PATH 从钉死 `/usr/bin:/bin` 改成保留继承尾部；`git diff` 守卫加 `--ignore-submodules=all`；缺 `g++` 的提示改指真正会产出 `/usr/bin/g++` 的包 | 上一行的那次放宽只到 `*-cygwin`，而本机 MSYS2 报 `x86_64-pc-msys`——四条腿里三条在这台 Windows 机器上根本起不来。逐条负向对照见 doc/09 §3（N-7…N-10） |
 | `scripts/run_golden.sh`、`scripts/run_interop.sh` | 新增归档时效守卫：`src/`、`include/` 里有比归档更新的 `.c/.h` 即 `exit 2`。写法是 `find … -print \| head -1`，不用 GNU 独有的 `-quit`（BSD/macOS 上会报错退出，配合 `2>/dev/null` 与空串判断正好让守卫静默失效） | 首轮 L1 拿 09‑13 的旧 `build/libleveldb.a` 跑，报出 4 个"伪 Linux 缺陷"（`sst-bloom`/`sst-bigblock` SIGSEGV、`edge` 断言、`tomb` 点查 NotFound）；换当前库立即全绿。守卫的负向对照两侧都做过：Linux 与 Windows 上各把归档 `touch` 到过去时间、用 `KVDB_LIB=` 指过去，两条脚本都拒绝运行（rc=2） |
 
 ## 4. 负向对照：怎么确认新用例真能抓到缺陷

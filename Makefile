@@ -57,6 +57,23 @@ TEST_OBJS := $(patsubst tests/%.c,$(OBJDIR)/tests/%.o,$(filter tests/%,$(TEST_SR
 LIB := $(BINDIR)/libleveldb.a
 TESTBIN := $(BINDIR)/kvdb_tests
 
+# Objects live in one shared directory but belong to the compiler namespace that
+# produced them: MSYS2 (/usr/bin), standalone Cygwin, MinGW-w64 and MSYS2's
+# clang all write build/*.o under identical names, and make judges freshness only
+# by mtime. So a Cygwin `make` on an msys-built tree reported "Nothing to be
+# done" and left a Cygwin shell holding an archive whose binaries need
+# msys-2.0.dll - which reads like a linker or engine bug, not a stale namespace
+# (doc/04 N-15). $(OBJDIR)/.target records who built the objects; a mismatch is
+# an error that names the remedy. Skipped for `clean`, which is the remedy.
+PREV_TARGET := $(firstword $(shell cat $(OBJDIR)/.target 2>/dev/null))
+ifeq ($(filter clean,$(MAKECMDGOALS)),)
+ifneq ($(and $(PREV_TARGET),$(TARGET_TRIPLET)),)
+ifneq ($(PREV_TARGET),$(TARGET_TRIPLET))
+$(error $(OBJDIR)/ holds objects built for $(PREV_TARGET) but $(CC) targets $(TARGET_TRIPLET); run 'make clean' before switching toolchains)
+endif
+endif
+endif
+
 .PHONY: all clean test
 
 all: $(LIB) $(TESTBIN)
@@ -64,6 +81,7 @@ all: $(LIB) $(TESTBIN)
 $(LIB): $(LIB_OBJS)
 	@mkdir -p $(BINDIR)
 	$(AR) rcs $@ $^
+	@printf '%s\n' '$(TARGET_TRIPLET)' > $(OBJDIR)/.target
 
 $(OBJDIR)/%.o: $(SRCDIR)/%.c src/kvdb.h src/port.h | $(OBJDIR)
 	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
@@ -88,5 +106,5 @@ test: $(TESTBIN)
 # evidence trees (build/interop/*, build/san-runs/*) that nothing else can
 # reproduce. rmdir succeeds just on an emptied, otherwise-unused object dir.
 clean:
-	rm -f $(LIB_OBJS) $(TEST_OBJS) $(LIB) $(TESTBIN) $(TESTBIN).exe
+	rm -f $(LIB_OBJS) $(TEST_OBJS) $(LIB) $(TESTBIN) $(TESTBIN).exe $(OBJDIR)/.target
 	-rmdir $(OBJDIR)/tests $(OBJDIR) 2>/dev/null

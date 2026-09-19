@@ -19,7 +19,11 @@
 # Env: MODES="..." override the mode list, KEEP=1 to keep the artifacts,
 #      GOLDEN_TIMEOUT=seconds, KVDB_LIB=path to the kvdb archive.
 set -uo pipefail
-export PATH=/usr/bin:/bin
+# Keep the inherited PATH as a tail: this script pins /usr/bin first so the
+# absolute tool paths below cannot resolve to a foreign-namespace gcc, but it
+# also execs build_official.sh, and a hard overwrite there used to leave that
+# script without git (not part of a default MSYS2 install).
+export PATH=/usr/bin:/bin${PATH:+:$PATH}
 REPO=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 CC=/usr/bin/gcc
 TIMEOUT=${GOLDEN_TIMEOUT:-120}
@@ -46,6 +50,18 @@ mkdir -p "$RUN/bin" "$RUN/db" "$RUN/logs"
 # silent no-op on exactly the platform where it still has to be proven out.
 if [[ -n "$(find "$REPO/src" "$REPO/include" -name '*.[ch]' -newer "$KVDB_LIB" -print 2>/dev/null | head -1)" ]]; then
   printf '%s is older than the sources in src/; run make first\n' "$KVDB_LIB" >&2
+  exit 2
+fi
+# Age is not the only way an archive can be the wrong one: build/ holds objects
+# for whichever toolchain last ran make, and mtime freshness cannot see that.
+# Here the kvdb and the reference halves are linked from one driver object, so a
+# foreign-namespace archive showed up as an ld "undefined reference" that read
+# like an engine defect (doc/04 N-14; the Makefile carries the matching guard).
+# No .target file means only "built before that record existed", not a claim.
+ARCH_TARGET=$(head -n 1 "$(dirname "$KVDB_LIB")/.target" 2>/dev/null || :)
+if [[ -n "$ARCH_TARGET" && "$ARCH_TARGET" != "$("$CC" -dumpmachine)" ]]; then
+  printf '%s was built for %s but this shell is %s; run make clean && make here first\n' \
+    "$KVDB_LIB" "$ARCH_TARGET" "$("$CC" -dumpmachine)" >&2
   exit 2
 fi
 # Every byte verdict below is a digest comparison (MSYS2 has sha256sum but

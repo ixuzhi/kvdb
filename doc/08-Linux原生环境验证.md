@@ -40,8 +40,9 @@ MinGW64 `env_win` 静态、clang64 `env_win` 动态），`doc/06` 的 P2-1 因�
 | 官方参考库 | `leveldb` 子模块固定提交 `7ee830d02b623e8ffe0b95d59a74db1e58da04c5`（`1.23-91-g7ee830d`） |
 
 参考库的 port 配置探针在两条腿上的实测值（右侧一列来自本机 MSYS2 腿，
-`build/interop/official/include/port/port_config.h` 与 `run_interop.sh` 打出的
-`Config:` 行都可核对）：
+`build/interop/official/<triple>/include/port/port_config.h` 与 `run_interop.sh` 打出的
+`Config:` 行都可核对；2026-09-20 起参考库按三元组分目录，本轮当时是共享的
+`official/include/…`，见 doc/04 N-14）：
 
 | 宏 | Linux(glibc) | MSYS2(cygwin) | 含义 |
 |---|---|---|---|
@@ -252,6 +253,13 @@ doc/06 P2-1 想要原生 Linux 的核心理由。
    归档更新的 `.c/.h`，否则 `exit 2` 并提示先 `make`。负向对照已做：把一个与源码
    同龄的归档 `touch` 到过去时间后两条腿都拒绝运行（rc=2），不是摆设。
 
+   > **这条守卫在 2026-09-20 被证明只有一维，而那一维不够。** mtime 说的是
+   > "归档比源码新"，没说"归档是谁建的"。Windows 一台机器上并存的 msys 与
+   > Cygwin 共享同一棵 `build/`，运行时却互不可见，于是参考库缓存串了档
+   > （N-14）、`make` 对着上一个命名空间的对象树回了一句 `Nothing to be
+   > done`（N-15）。两处现在都按三元组记账：参考库分目录 + 摘要认档，
+   > 对象树 `$(OBJDIR)/.target`。编号与全过程见 doc/04 N-14/N-15、doc/09 §3。
+
 ### 脚本侧跨平台改造清单（Linux 与 MSYS2 双通路）
 
 | 文件 | 改动 |
@@ -261,6 +269,8 @@ doc/06 P2-1 想要原生 Linux 的核心理由。
 | `scripts/run_golden.sh` | 新增归档时效守卫；用法注释加 Linux 一行 |
 | `scripts/run_sanitizers.sh` | `CC` 缺省按宿主选（Windows 目标→clang，其余→gcc）；`-D_GNU_SOURCE` 只在 `*linux*` 下加到脚本自己编的 `c_test.o`/`golden_driver.o`；`TMP`/`cygpath` 兜底块只对 Windows/cygwin/mingw 目标生效（POSIX 上原来会退化成 `TMP=.`，把留档写进仓库）；leak 行按平台分别陈述，Linux 侧支持 `SAN_DETECT_LEAKS=1`；make 走 `SANFLAGS`。定稿前又收了一次口：三元组只求值一次（`TRIPLE`/`ON_WINDOWS` 两个变量），"编译器不在 PATH"的提示按选中的 `CC` 分支给（原来在 Linux 上 gcc 缺失时会反建议"用 gcc"）。这次改动之后 L3 重跑过一遍，仍 rc=0 零报告（§1 表第二个证据目录） |
 | `Makefile` | 新增 `SANFLAGS` 通道（见上） |
+| （2026-09-20）上述四条 | POSIX 判据再补 `*-msys`；`export PATH=/usr/bin:/bin` 改为保留继承尾部并加 `command -v git` 前置检查；`git diff` 守卫加 `--ignore-submodules=all`；缺 `g++` 的提示改指会产出 `/usr/bin/g++` 的包。**2026-09-20 的第二次放宽**，动机是换了一台 Windows 机器后三条腿起不来，逐条负向对照见 doc/09 §3 |
+| （2026-09-20）`scripts/run_cross_backend.sh` | 新脚本：同一台机器上用 POSIX 三元组与 Windows 三元组各建一份引擎，比落盘字节与四方向摘要，并用 8 并发进程探跨进程锁。不依赖官方参考库 |
 
 ---
 
@@ -303,6 +313,17 @@ doc/06 P2-1 想要原生 Linux 的核心理由。
 
 三条通路都是 Git Bash 起 MSYS2 shell、手工导出 `PATH` 的取法（`MSYSTEM=MSYS` 单独
 前缀不会让 `clang` 出现在普通 Git Bash 里，脚本里那条提示就是为此写的）。
+
+> **2026-09-20 更正（保留上表原文不改，因为它是那台机器的真实读数）**：
+> 本轮换了一台 Windows 机器，同一层的 `/usr/bin/gcc -dumpmachine` 报的是
+> `x86_64-pc-msys`（gcc 13.3.0 / msys 运行时 3.5.7），不是上表的
+> `x86_64-pc-cygwin`（gcc 15.2.0）。也就是说 msys 层这个三元组**在 MSYS2 的
+> 两个世代之间确实变过**（更早的 msys gcc 沿用 Cygwin 的 `--host`，后来改成
+> 自报 `-msys`），所以判据两种拼法都必须收——只写一种的后果已经在另一台机器
+> 上兑现过一次：`build_official.sh` 直接拒绝构建参考库（doc/04 N-7、doc/09 §3）。
+> 同一轮里独立 Cygwin 首次装起来，它一直报 `x86_64-pc-cygwin`（gcc 14.4.0）。
+> 另：本机 MSYS2 **没有装** mingw64/ucrt64 的 gcc（`/d/msys64/mingw64/bin/gcc.exe`
+> 不存在），MinGW-w64 那一支由 w64devkit gcc 16.2.0 代表。
 
 ### 8.2 五个风险点的实测结论
 
@@ -383,7 +404,7 @@ apt-get install --no-install-recommends --no-download -y g++ libsnappy-dev lcov 
 | T3 | **行/分支覆盖率报告**（"覆盖完全"的量化口径） | `lcov` 装过又卸了（可离线装回，见本节开头）；`gcov` 随 gcc 还在，但**本轮从未做过 `--coverage` 构建**，全仓库 0 个 `.gcno/.gcda`，没有现成数据 | `make clean && make OBJDIR=build_cov BINDIR=build_cov SANFLAGS="--coverage"`（**必须走 `SANFLAGS`**：命令行给 `CFLAGS=` 会吞掉 `+=` 的 `-D_GNU_SOURCE`/`-lpthread`，正是 §6 坑①），再 `lcov --capture --directory build_cov --output-file cov.info` + `genhtml`，未命中行逐条回填 doc/05。**配方前半段已实测**（在 `/tmp` 里做的一次性构建，探针产物随后删掉）：`SANFLAGS="--coverage"` 的编译行里 `-D_GNU_SOURCE` 与 `--coverage` 并存、25 个 `.gcno`、跑完 127/0 并落下 36 个 `.gcda`；后半段（`--capture`/`genhtml`）因 `lcov` 已卸未跑，重装后再验。 |
 | T4 | **多进程锁语义专项**（P2-6） | Linux 的 `fcntl` 区域锁与 Windows 独占打开语义不同，只有原生 POSIX 能测真值 | 两进程同时 `leveldb_open` 同一目录，断言第二个拿到 `IO error`；与官方 `env_posix` 行为对照 |
 | T5 | snappy 压缩模式并入正式腿（P2-8，见 §7） | 探路已完成 | 决定官方库是否默认开 `HAVE_SNAPPY`，并加 `sst-snappy` 模式 |
-| T6 | macOS 实机确认（P2-1 的另一半） | Linux 那轮的机器与这台 Windows 机都没有 macOS | 同 L0/L1 两条腿；注意 `HAVE_FULLFSYNC=1` 会让 port 配置探针结果不同。**动身前先按源码读到的四处 GNU 依赖做准备**：① 三元组断言只接受 `*-cygwin`/`*linux*`（`build_official.sh:31`、`run_interop.sh:38`），`x86_64-apple-darwin…` 会被拒；② `/usr/bin/timeout` 在 macOS 上不存在（两条脚本用它包每次执行）；③ `sha256sum`/`stat -c` 这两处已在 §8.3 第 3 条改成 fail-closed + POSIX 写法；④ `cp -a` 是 GNU 拼写，BSD 侧待核。§8.3 第 1 条（`CC` 判据）与第 2 条（`find -quit`）也正是为这条通路铺的 |
+| T6 | macOS 实机确认（P2-1 的另一半） | Linux 那轮的机器与这台 Windows 机都没有 macOS | 同 L0/L1 两条腿；注意 `HAVE_FULLFSYNC=1` 会让 port 配置探针结果不同。**动身前先按源码读到的四处 GNU 依赖做准备**：① 三元组断言只接受 `*-cygwin`/`*-msys`/`*linux*`（`build_official.sh`、`run_interop.sh`；2026-09-20 补了 `*-msys`），`x86_64-apple-darwin…` 会被拒；② `/usr/bin/timeout` 在 macOS 上不存在（两条脚本用它包每次执行）；③ `sha256sum`/`stat -c` 这两处已在 §8.3 第 3 条改成 fail-closed + POSIX 写法；④ `cp -a` 是 GNU 拼写，BSD 侧待核。§8.3 第 1 条（`CC` 判据）与第 2 条（`find -quit`）也正是为这条通路铺的 |
 | T7 | §4 的告警集合（Linux gcc 12 与 MSYS gcc 15.2 各 6 条，MINGW64 gcc 16.1 与 clang64 各 8 条） | 未改，属既有代码质量；位置已逐条对过官方源（§4 第二张表） | 逐条清（先 `table.c:420` 的 const 丢弃），改完四条通路各重跑一次 |
 | T8 | 官方 `corruption_test`（P1-2 → P2-3） | 需先实现故障注入 Env，非环境缺口 | 见 doc/06 P1-2 |
 

@@ -5,7 +5,11 @@
 # No cmake, make, clean, submodule edits, or main object/library writes.
 # Reference sources/settings mirror the pinned CMakeLists.txt and port config.
 set -euo pipefail
-export PATH=/usr/bin:/bin
+# /usr/bin and /bin lead so the absolute tool paths below cannot resolve to a
+# foreign-namespace gcc; the inherited PATH stays on as a tail because git is
+# not part of a default MSYS2 install, and dropping it made this script die at
+# `git: command not found` (rc=127) before it could report anything useful.
+export PATH=/usr/bin:/bin${PATH:+:$PATH}
 REPO=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 ROOT="$REPO/build/interop"
 PIN=7ee830d02b623e8ffe0b95d59a74db1e58da04c5
@@ -19,23 +23,39 @@ mkdir -p "$ROOT"
 RUN=$(mktemp -d "$ROOT/run-XXXXXXXX")
 exec > >(tee "$RUN/run.log") 2>&1
 printf 'Artifacts: %s\n' "$RUN"
+command -v git >/dev/null 2>&1 || {
+  printf 'git not found on PATH - the reference checkout must be verified.\n' >&2
+  printf 'MSYS2: pacman -S git\n' >&2; exit 2; }
 commit=$(git -C "$REPO/leveldb" rev-parse HEAD)
 [[ "$commit" == "$PIN" ]] || { printf 'Wrong official commit: %s\n' "$commit"; exit 2; }
 # Windows checkout has CRLF; normalize only for this read-only integrity check.
-git -c core.autocrlf=true -C "$REPO/leveldb" diff --quiet HEAD -- || { printf 'Official tracked files modified; refusing reference build\n'; exit 2; }
+# --ignore-submodules=all: the guard means "nobody edited the C++ sources this
+# script compiles". third_party/benchmark is a nested submodule pointer, is
+# never compiled here, and drifts on any clone where it was not checked out -
+# counting it refused every reference build on a fresh Windows checkout.
+git -c core.autocrlf=true -C "$REPO/leveldb" diff --quiet HEAD --ignore-submodules=all -- || { printf 'Official tracked files modified; refusing reference build\n'; exit 2; }
 printf 'Official commit: %s\n' "$commit"
 # Fail here rather than at the first "$CXX" line below: this script builds and
 # links the reference engine itself, so a missing C++ compiler (the normal state
 # once the verification packages are uninstalled - see doc/08 §3) is a
 # precondition failure, not an engine failure.
 [[ -x "$CXX" ]] || {
-  printf '%s not found - the official reference engine is C++ and needs a compiler.\n' "$CXX"
-  printf 'Debian/Ubuntu: apt-get install g++   MSYS2: pacman -S mingw-w64-ucrt-x86_64-gcc\n' >&2
+  printf '%s not found - the official reference engine is C++ and needs a compiler.\n' "$CXX" >&2
+  printf 'This script builds with /usr/bin/g++, so the package has to provide that path.\n' >&2
+  printf 'Debian: apt-get install g++   MSYS2 (MSYS shell): pacman -S gcc   Cygwin: setup -P gcc-g++\n' >&2
   exit 2; }
 "$CC" --version
 "$CXX" --version
 "$AR" --version
-[[ $("$CC" -dumpmachine) == *-cygwin || $("$CC" -dumpmachine) == *linux* ]] || { printf 'Expected a POSIX compiler (MSYS2 /usr/bin gcc or native Linux gcc)\n'; exit 2; }
+# The POSIX reference build needs a compiler whose target *is* POSIX. Three
+# triples qualify: native Linux, standalone Cygwin, and MSYS2's msys layer -
+# the last of these reports x86_64-pc-msys, not the -cygwin suffix this test
+# used to require, so every current MSYS2 install was refused.
+TRIPLE=$("$CC" -dumpmachine)
+case "$TRIPLE" in
+  *linux*|*-cygwin|*-msys) ;;
+  *) printf 'Expected a POSIX compiler (native Linux gcc, Cygwin gcc, or MSYS2 /usr/bin gcc), got %s\n' "$TRIPLE"; exit 2 ;;
+esac
 KVDB=${KVDB_LIB:-$REPO/build/libleveldb.a}
 [[ -f "$KVDB" ]] || { printf 'Missing prebuilt %s; build it separately first\n' "$KVDB"; exit 2; }
 # Same staleness trap as scripts/run_golden.sh: never interop-test an archive
@@ -44,6 +64,17 @@ KVDB=${KVDB_LIB:-$REPO/build/libleveldb.a}
 # otherwise fail open as a silent no-op.
 if [[ -n "$(find "$REPO/src" "$REPO/include" -name '*.[ch]' -newer "$KVDB" -print 2>/dev/null | head -1)" ]]; then
   printf '%s is older than the sources in src/; run make first\n' "$KVDB" >&2
+  exit 2
+fi
+# ... and the same staleness trap across namespaces: build/ holds objects for
+# whichever toolchain last ran make, and mtime cannot see that. Linking a
+# foreign-namespace archive here surfaced as an "undefined reference" from ld
+# that read like an engine defect (doc/04 N-14; the Makefile carries the
+# matching guard). No .target file simply means an older build - not a claim.
+ARCH_TARGET=$(head -n 1 "$(dirname "$KVDB")/.target" 2>/dev/null || :)
+if [[ -n "$ARCH_TARGET" && "$ARCH_TARGET" != "$TRIPLE" ]]; then
+  printf '%s was built for %s but this shell is %s; run make clean && make here first\n' \
+    "$KVDB" "$ARCH_TARGET" "$TRIPLE" >&2
   exit 2
 fi
 # Snapshot the exact prebuilt library, avoiding concurrent rebuild races.

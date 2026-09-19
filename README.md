@@ -119,25 +119,44 @@ make test       # 运行全部测试
 `_tools/w64devkit/`，首次构建时自动下载），并在原生 Linux（Debian 12
 glibc）上完整跑过一遍同样的验证腿。构建系统按编译器目标
 （`gcc -dumpmachine`）自动选择 Env 后端：Windows 三元组（含 `mingw`
-或 `windows`）用 `env_win.c`，其余环境（Linux / macOS / MSYS2）用
-`env_posix.c` + pthread。四条已实测的工具链：
+或 `windows`）用 `env_win.c`，其余环境（Linux / macOS / MSYS2 msys /
+Cygwin）用 `env_posix.c` + pthread。五条已实测的工具链：
 
 | 工具链 | 目标三元组 | 后端 | 结果 |
 |---|---|---|---|
-| MSYS2 gcc 15（`MSYSTEM=MSYS`） | `x86_64-pc-cygwin` | `env_posix.c` | 127/127 |
+| MSYS2 gcc 13.3（`MSYSTEM=MSYS`） | `x86_64-pc-msys` | `env_posix.c` | 127/127 + 黄金比对 + 官方 `c_test` |
+| 独立 Cygwin gcc 14.4 | `x86_64-pc-cygwin` | `env_posix.c` | 127/127 + 黄金比对 + 官方 `c_test` |
 | MinGW64 gcc 16（`MSYSTEM=MINGW64`，含 w64devkit） | `x86_64-w64-mingw32` | `env_win.c`（静态） | 127/127 + 官方 `c_test` 通过 |
 | MSYS2 clang 22（`MSYSTEM=CLANG64`） | `x86_64-w64-windows-gnu` | `env_win.c`（动态） | 127/127，ASan+UBSan 零报告 |
 | 原生 Linux gcc 12.2（Debian glibc） | `x86_64-linux-gnu` | `env_posix.c` | 127/127 + 黄金比对 + 官方 `c_test` + ASan/UBSan 零报告 |
+
+前两行是本轮新测的，写在 `doc/09-Windows工具链矩阵与Cygwin验证.md`。这里
+有一个容易踩空的地方：MSYS2 的 msys 层是 Cygwin 的 fork，但它的 gcc 报的
+是 `x86_64-pc-msys` 而不是 `x86_64-pc-cygwin`；上一轮的脚本按 `*-cygwin`
+枚举 POSIX 编译器，于是在另一台 Windows 机器上连官方参考库都拒绝构建
+（doc/04 N-7）。`Makefile` 用的是"非 Windows 即 POSIX"的排除式判断，
+从来没错过——错的是脚本里手抄的肯定式清单。
 
 macOS 有待一次实机确认。sanitizer 这轮的编译器按主机挑：Windows 上只能
 用 clang64（MSYS2 没有 `mingw-w64-x86_64-sanitizers` 这个包，gcc 侧拿不到
 libasan/ubsan 运行时；clang64 自带
 `libclang_rt.asan_dynamic-x86_64.dll`）；Linux 上没有这个限制，脚本默认改用
-gcc 的同一套 `-fsanitize=address,undefined`。原生 Linux 这一遍还逼出了
+gcc 的同一套 `-fsanitize=address,undefined`。"Windows 的 gcc 拿不到
+sanitizer 运行时"这半句本轮做成了穷尽式确认，而且把范围从 MSYS2 扩到了
+Cygwin：同一份空程序拿去让 Windows 家族每一支编译器都试一次
+`-fsanitize=address,undefined`，msys gcc 13.3、w64devkit gcc 16.2、Cygwin gcc
+14.4 三支全部 `cannot find -lasan`/`-lubsan`，只有 clang 22.1.8 链得上；Cygwin
+那边还额外挖了仓库索引（16,087 个包，按包名筛 `asan` 命中 0）。所以 Windows
+家族里 clang64 是唯一通路，`run_sanitizers.sh` 对 `*-cygwin`/`*-msys` 三元组
+的早退是对的（doc/09 §4.3）。
+原生 Linux 这一遍还逼出了
 Windows 三条工具链都看不见的缺陷 P0-10（`memcpy` 传 NULL，glibc 声明
 `nonnull` 而 msvcrt 没有），详见 `doc/08-Linux原生环境验证.md`。上表 Windows
 三行在 P0-10 修复合入后**又实跑过一遍**：单测、官方 `c_test`、ASan/UBSan、
 黄金比对全部复现原结果，`results.tsv` 与修复前那轮逐行相同（doc/08 §8）。
+本轮的 clang64 那一条是重装工具链后重新跑的，同样 `rc=0`、零报告；而且它在
+`sst-bigblock` 上算出的摘要与未插桩的 `env_posix`/`env_win` 两个后端逐字符
+相同——sanitizer 换了内存布局，没换落盘字节（doc/09 §8）。
 
 原生 Linux 这一轮为拿到全部四条腿新装的包（g++、libsnappy-dev、lcov 等
 7 个）与对应的卸载命令记录在 `doc/08-Linux原生环境验证.md` §3——
@@ -150,26 +169,44 @@ lcov 那一件本轮装而未用，见同文 §9 T3。这 7 个包在本轮结�
 `ar rcs` 只替换同名成员，不会删除上一个目标遗留的 `.o`，因此
 MSYS2（`env_posix.o`）与 MinGW64（`env_win.o`）混用同一 `build/`
 会产出同时含两个后端、且 `__errno`/`fsync` 未定义而链接失败的归档。
-四条工具链各自的验证方式：
+本轮起这条规则由 `make` 自己执行：`$(OBJDIR)/.target` 记下产出这批对象的
+三元组，换了工具链又没 `clean` 时 Makefile 直接报错并指名 `make clean`
+（`make clean` 本身豁免）。此前它的表现是一句 `Nothing to be done for 'all'.`
+——msys 建完之后拿 Cygwin 的 shell 敲 `make`，得到的仍是需要 `msys-2.0.dll`
+的 msys 二进制（doc/04 N-15）。
+五条工具链各自的验证方式：
 
 ```bash
 MSYSTEM=MSYS   bash scripts/run_interop.sh   # POSIX 后端 + 跨引擎互操作
+bash scripts/run_cross_backend.sh            # env_posix 与 env_win 的逐字节等价
 MSYSTEM=MINGW64 make OBJDIR=build_mingw BINDIR=build_mingw && ./build_mingw/kvdb_tests
 MSYSTEM=CLANG64 bash scripts/run_sanitizers.sh  # ASan+UBSan：127 例 + 官方 c_test + golden 驱动
 bash scripts/run_sanitizers.sh                # 原生 Linux：同上，但用 gcc 的 sanitizer 运行时
 ```
 
-前三行都假定已经在对应的 MSYS2 shell 里——`MSYSTEM=` 只是标注，普通 Git Bash
+独立 Cygwin 不用 `MSYSTEM`（那是 MSYS2 的变量），在 Cygwin 的 bash 里跑同一条
+`run_interop.sh` 即可；它是第五个跑通全部脚本腿的环境，见 doc/09 §4。
+
+数警告之前先 `export LC_ALL=C`：MSYS2 的登录 shell 会把 `LANG` 设成
+`zh_CN.UTF-8`，此后 `grep 'warning:'` 恒定返回 0（doc/09 §3 的 N-12）。
+
+上面除最后一行外，每一行都假定自己跑在对应的 shell 里（MSYS2 的三个
+MSYS/MINGW64/CLANG64 之一，或原生 Linux）——`MSYSTEM=` 只是标注，普通 Git Bash
 里这样前缀不会把 `/clang64/bin` 之类加进 PATH（脚本会在这种情况下直接报
-"clang is not on PATH" 并给出可用的调用形式，而不是先删掉对象树）。
+"clang is not on PATH" 并给出可用的调用形式，而不是先删掉对象树）。Git Bash
+也提供 `/usr/bin`，但里面没有 gcc，所以 `run_cross_backend.sh` 在那里会在
+探测编译器这一步退出。
 同一条规则跨平台也成立：对象树里留着上一个平台的后端 `.o` 时，换一个
 `OBJDIR` 或先 `make clean`，不要指望 `ar` 清理它。
 
 ## 与真实 LevelDB 的二进制兼容性验证
 
-两套互补的跨引擎工具（外加把同一批证据放进 sanitizer 重跑的脚本），
+两套互补的跨引擎工具（外加把同一批证据放进 sanitizer 重跑的脚本、
+以及一条不依赖官方库的跨后端脚本），
 都针对 `leveldb/` 子模块固定的官方提交构建真实 leveldb 静态库
-（`scripts/build_official.sh`，子模块被改动或提交不匹配时直接拒绝运行），
+（`scripts/build_official.sh`，子模块被改动或提交不匹配时直接拒绝运行；
+参考库按三元组缓存在 `build/interop/official/<triple>/`，缓存标记的内容是
+归档摘要，命中前重算），
 并用**同一份**只调用公共 C API 的驱动分别链接两个引擎——两个引擎的
 任何一次链接都不允许同时出现。
 
@@ -177,15 +214,23 @@ bash scripts/run_sanitizers.sh                # 原生 Linux：同上，但用 g
 bash scripts/build_official.sh            # 生成官方参考库，输出归档路径
 bash scripts/run_golden.sh                # 逐字节黄金比对（默认 10 种负载）
 RUN_C_TEST=1 bash scripts/run_interop.sh  # 双向读写互操作 + 官方 c_test
+bash scripts/run_cross_backend.sh         # 同一台机器上 env_posix vs env_win
 MSYSTEM=CLANG64 bash scripts/run_sanitizers.sh  # 以上证据再过一遍 ASan/UBSan
 ```
 
-四条脚本在 MSYS2 与原生 Linux 上是同一份：编译器三元组落在
-`*-cygwin`/`*linux*` 时走 POSIX 后端，Windows 专用段落（`cygpath`、
-`GetTempPathA` 兜底）只在 Windows 三元组下执行。吃现成归档的两条
+五条脚本在 MSYS2、独立 Cygwin 与原生 Linux 上是同一份：编译器三元组落在
+`*-msys`/`*-cygwin`/`*linux*` 时走 POSIX 后端，Windows 专用段落（`cygpath`、
+`GetTempPathA` 兜底）只在 Windows 三元组下执行。其中
+`run_cross_backend.sh` 虽然四个平台都不用改一行，但它的**判据**是 Windows
+独有的——要一台机器上同时有 POSIX 三元组和 Windows 三元组的编译器，
+原生 Linux 上除非装 `x86_64-w64-mingw32-gcc` 交叉工具链，否则它会在探测
+`CC_WIN` 这一步退出（这是正确的行为，不是脚本坏）。吃现成归档的两条
 （`run_golden.sh`、`run_interop.sh`，默认 `build/libleveldb.a`，可用
 `KVDB_LIB=` 指到别处）会先比对归档与 `src/`、`include/` 的 mtime——比源码
-旧就直接退出，避免"用一次性构建的旧归档验证当前代码"这种假绿；
+旧就直接退出，避免"用一次性构建的旧归档验证当前代码"这种假绿；还会比对
+`build/.target` 里记的三元组与当前 shell 的是否一致——`build/` 只有一份，
+msys 与 Cygwin 在磁盘上看得见彼此、在运行时却互不可见，串了档的表现是 ld
+报一个像引擎缺陷的未定义符号（doc/04 N-14、N-15）；
 `run_golden.sh` 另外在动工前就选定并校验摘要命令（`sha256sum`，BSD/macOS 上
 退回 `shasum -a 256`）——逐字节判据本身就是一次摘要比较，工具缺失时两边都是
 空串，`"" == ""` 会把一次什么都没比的运行报成绿色；
@@ -208,6 +253,15 @@ MSYSTEM=CLANG64 bash scripts/run_sanitizers.sh  # 以上证据再过一遍 ASan/
   它还会独立探测工具链能不能链接 snappy——Windows 上探不到（打印
   SKIP），Linux 装了 `libsnappy-dev` 后打印 available；两种情况下
   压缩模式都不跑，脚本只记录事实，不声称覆盖了压缩路径。
+- `scripts/run_cross_backend.sh`（本轮新增，不依赖官方库）：同一台 Windows
+  上用两个编译器各建一份引擎——POSIX 三元组走 `env_posix.c`、Windows
+  三元组走 `env_win.c`——然后要同一件事：两种后端写出的目录除 `LOG*`/`LOCK`
+  外**逐字节相同**，四个方向（谁创建 × 谁读取）的摘要必须全等。这一条
+  补的是一个从没被覆盖过的缺口：MSYS2 那条腿与 MinGW 那条腿各自内部一致，
+  但没有人证明过两个 Env 后端产出的字节是同一份。它另外用 8 个并发 `verify`
+  进程探跨进程锁，两种后端都必须"有人开成、有人被拒"——零争用会被判 FAIL，
+  因为那说明探针坏了而不是平台幸运。实测 9/9 模式、33 个文件 SAME、
+  58 项 PASS、0 FAIL（doc/09 §5）。
 - `scripts/run_sanitizers.sh`：同一批证据在 `-fsanitize=address,undefined
   -fno-omit-frame-pointer -fno-sanitize-recover=all` 下重跑一遍
   （127 例 + 官方 `c_test` + `golden_driver` 的 create/verify，可选
@@ -256,6 +310,9 @@ MSYSTEM=CLANG64 bash scripts/run_sanitizers.sh  # 以上证据再过一遍 ASan/
   （`libasan.so.8`，负向探针实测能报），脚本已加 `SAN_DETECT_LEAKS=1`
   开关随时可跑；这一轮按"先记录、暂不执行"处理
   （doc/06 P2-9，doc/08 §9 T1）。
-- 并发维度只有 2 写 2 读 120 轮屏障用例，未跑 ThreadSanitizer、也没做
-  多进程锁竞争专项（Linux 上 `libtsan` 就位、`fcntl` 区域锁语义可直接
-  测真值，同样记为 TODO：doc/08 §9 T2/T4）。
+- 并发维度只有 2 写 2 读 120 轮屏障用例，未跑 ThreadSanitizer。多进程锁
+  竞争这一项本轮已闭环：`run_cross_backend.sh` 用 8 个并发 `verify` 进程
+  压同一批目录，`env_win.c`（`CreateFileA` 独占共享模式，回 `ERROR_SHARING_VIOLATION`）
+  与 `env_posix.c`（`flock`）两侧都观察到"有人开成、有人被拒"，且开成的
+  那些摘要一致（doc/06 P2-6，doc/09 §5）。Linux 上 `libtsan` 就位，
+  ThreadSanitizer 仍记为 TODO（doc/08 §9 T2）。

@@ -1,8 +1,9 @@
-// env_posix.c - POSIX implementation of the Env interface (Linux/macOS).
+// env_posix.c - POSIX implementation of the Env interface.
 //
-// NOTE: this backend was written for portability but has NOT been executed
-// in this project's development environment (Windows). Treat as
-// best-effort; run the test suite on a POSIX host before relying on it.
+// Executed on native Linux (glibc) and on the POSIX-emulating Windows layers
+// (MSYS2's msys target); the backend is selected by the !_WIN32 test below, so
+// a host that defines _WIN32 while offering POSIX semantics must be excluded
+// there or it silently links the Windows Env instead.
 #include "kvdb.h"
 
 #if !defined(_WIN32)

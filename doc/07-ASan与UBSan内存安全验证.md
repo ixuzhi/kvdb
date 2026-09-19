@@ -1,7 +1,7 @@
 # 07 — ASan/UBSan 内存安全验证记录
 
-本文档专记 2026-09-19 的内存安全复核这一条验证腿：为什么只有 clang64 能跑、
-这条腿到底跑了什么、它暴露的两个真实缺陷（doc/06 P0-8、P0-9）以及**为此改动
+本文档专记 2026-09-19 的内存安全复核这一轮验证：为什么只有 clang64 能跑、
+它到底跑了什么、暴露的两个真实缺陷（doc/06 P0-8、P0-9）以及**为此改动
 的每一处代码**，最后给出负向对照的做法与"它没能覆盖什么"。
 缺陷的现象/定位/根因叙事在 doc/04 的 E-14 与 N-6，本文按文件展开改动本身。
 
@@ -15,11 +15,11 @@
 | MinGW64 gcc 16.1（`MSYSTEM=MINGW64`） | `x86_64-w64-mingw32` | 同上 |
 | MSYS2 clang 22.1.8（`MSYSTEM=CLANG64`） | `x86_64-w64-windows-gnu` | **有**：`libclang_rt.asan_dynamic-x86_64.dll` 随工具链交付 |
 
-也就是说这不是"换个编译选项"那么轻：为了让这条腿可跑，Makefile 必须先能
+也就是说这不是"换个编译选项"那么轻：为了让这轮验证可跑，Makefile 必须先能
 正确识别 clang 的目标三元组（见 §3 的 Makefile 改动），否则它会被当成 POSIX
 目标去编 `env_posix.c`。
 
-## 2. 这一条腿跑了什么
+## 2. 这一轮验证跑了什么
 
 一条命令（需在 MSYS2 的 CLANG64 shell 内）：
 
@@ -128,7 +128,7 @@ Windows 上 `DestroyDB` 之后同路径重开报 win32 error 32（共享冲突�
 
 留档：`build/san-runs/interop-<时间戳>/{run.log,build.log,unit.log,c_test.log,<mode>.log}`。
 
-## 6. 这条腿覆盖不到的部分
+## 6. 这轮验证覆盖不到的部分
 
 - **泄漏**：Windows 版 ASan 不带 LeakSanitizer，`ASAN_OPTIONS=detect_leaks=1`
   会在 `main` 之前直接退出并打印 "detect_leaks is not supported on this

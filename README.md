@@ -122,7 +122,7 @@ make test       # 运行全部测试
 | MinGW64 gcc 16（`MSYSTEM=MINGW64`，含 w64devkit） | `x86_64-w64-mingw32` | `env_win.c`（静态） | 127/127 + 官方 `c_test` 通过 |
 | MSYS2 clang 22（`MSYSTEM=CLANG64`） | `x86_64-w64-windows-gnu` | `env_win.c`（动态） | 127/127，ASan+UBSan 零报告 |
 
-原生 Linux（glibc）/macOS 有待一次实机确认。sanitizer 腿只对 clang64
+原生 Linux（glibc）/macOS 有待一次实机确认。sanitizer 这轮验证只对 clang64
 可用：MSYS2 没有 `mingw-w64-x86_64-sanitizers` 这个包，gcc 侧拿不到
 libasan/ubsan 运行时；clang64 自带 `libclang_rt.asan_dynamic-x86_64.dll`。
 

@@ -33,7 +33,14 @@ void ldb_buffer_reserve(ldb_buffer* b, size_t n) {
 }
 
 void ldb_buffer_resize(ldb_buffer* b, size_t n) {
-  ldb_buffer_reserve(b, n);
+  if (n > b->size) {
+    ldb_buffer_reserve(b, n);
+    // Growth zero-fills, matching std::string::resize: the SSTable footer
+    // padding must be deterministic bytes rather than recycled heap memory.
+    memset(b->data + b->size, 0, n - b->size);
+  } else {
+    ldb_buffer_reserve(b, n);
+  }
   b->size = n;
 }
 

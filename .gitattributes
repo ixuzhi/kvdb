@@ -1,0 +1,3 @@
+# The repo works with core.autocrlf=true, which would check the harness shell
+# scripts out with CRLF and break `bash script.sh` (\r is not stripped).
+*.sh text eol=lf

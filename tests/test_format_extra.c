@@ -329,6 +329,29 @@ TEST(format_extra, FooterAppendRoundtripAndInvalid) {
   ldb_buffer_destroy(&b);
 }
 
+TEST(format_extra, FooterPaddingSurvivesDirtyReusedCapacity) {
+  // std::string::resize zero-fills, so the reference footer padding is always
+  // 0x00. A reused builder buffer holds stale bytes past its size; growing
+  // into that capacity without clearing them changes the on-disk bytes.
+  ldb_footer footer = {{128, 300}, {UINT64_C(1) << 40, 4096}}, parsed;
+  ldb_buffer b;
+  ldb_buffer_init(&b);
+  static char dirt[1024];
+  memset(dirt, 0x5a, sizeof(dirt));
+  ldb_buffer_append(&b, dirt, sizeof(dirt));
+  ldb_buffer_clear(&b);
+  ldb_footer_encode(&footer, &b);
+  CHECK_EQ(LDB_FOOTER_ENCODED_LENGTH, b.size);
+  // metaindex {128,300} and index {1<<40,4096} encode to 4 + 8 varint bytes;
+  // everything up to the 40-byte handle region and the trailing magic is padding.
+  for (size_t i = 12; i < 40; i++) CHECK_EQ(0, (unsigned char)b.data[i]);
+  ldb_slice input = ldb_buffer_slice(&b);
+  fe_ok(ldb_footer_decode(&parsed, &input));
+  CHECK(parsed.metaindex_handle.offset == footer.metaindex_handle.offset);
+  CHECK(parsed.index_handle.size == footer.index_handle.size);
+  ldb_buffer_destroy(&b);
+}
+
 TEST(format_extra, BlockRestartLayoutAndBidirectionalSeek) {
   ldb_options options;
   ldb_options_init(&options);

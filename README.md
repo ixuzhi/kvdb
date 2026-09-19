@@ -2,11 +2,11 @@
 
 用 **纯 C（C11，零第三方依赖）** 完整实现的 LevelDB 存储引擎。接口与
 LevelDB 官方 C 绑定（`leveldb/c.h`）**完全兼容**，磁盘格式（SSTable /
-WAL / MANIFEST / CURRENT）与 LevelDB **逐字节兼容**，并把 LevelDB 的
-测试用例集移植到 C 后全部跑通。
+WAL / MANIFEST / CURRENT）与 LevelDB **逐字节兼容**（由跨引擎黄金比对
+验证，见下节），并把 LevelDB 的测试用例集移植到 C 后全部跑通。
 
 ```text
-92 tests, 0 failed
+125 tests, 0 failed
 ```
 
 ## 目录结构
@@ -110,7 +110,45 @@ make test       # 运行全部测试
 （`gcc -dumpmachine`）自动选择 Env 后端：MinGW 用 `env_win.c`，
 其余环境（Linux / macOS / MSYS2）用 `env_posix.c` + pthread。
 POSIX 后端已在 MSYS2 环境（`pacman -S make gcc` 后直接 `make`）
-构建并跑通全部 92 个用例；原生 Linux/macOS 有待一次实机确认。
+构建并跑通全部用例；原生 Linux/macOS 有待一次实机确认。
+
+**切换工具链时必须换一个新的 `OBJDIR`（或先 `make clean`）**：
+`ar rcs` 只替换同名成员，不会删除上一个目标遗留的 `.o`，因此
+MSYS2（`env_posix.o`）与 MinGW64（`env_win.o`）混用同一 `build/`
+会产出同时含两个后端、且 `__errno`/`fsync` 未定义而链接失败的归档。
+两条后端各自的验证方式：
+
+```bash
+MSYSTEM=MSYS   bash scripts/run_interop.sh   # POSIX 后端 + 跨引擎互操作
+MSYSTEM=MINGW64 make OBJDIR=build_mingw BINDIR=build_mingw && ./build_mingw/kvdb_tests
+```
+
+## 与真实 LevelDB 的二进制兼容性验证
+
+两套互补的跨引擎工具，都针对 `leveldb/` 子模块固定的官方提交构建
+真实 leveldb 静态库（`scripts/build_official.sh`，子模块被改动或提交
+不匹配时直接拒绝运行），并用**同一份**只调用公共 C API 的驱动分别链接
+两个引擎——两个引擎的任何一次链接都不允许同时出现。
+
+```bash
+bash scripts/build_official.sh            # 生成官方参考库，输出归档路径
+bash scripts/run_golden.sh                # 逐字节黄金比对（默认 10 种负载）
+RUN_C_TEST=1 bash scripts/run_interop.sh  # 双向读写互操作 + 官方 c_test
+```
+
+- `scripts/run_golden.sh`（`tests/interop/golden_driver.c`）：固定选项、
+  无随机无时钟的确定性负载（SSTable/布隆/restart=1/大块/WAL/超 32KiB
+  分片记录/空与二进制键值/删除标记/多层压缩）。每两种引擎各写一遍，
+  除 `LOG*`/`LOCK` 外的所有文件必须**逐字节相同**；随后两个引擎交叉读
+  对方的目录（点查 + 正/反向全扫描），四个摘要必须一致。严格模式下
+  9/9 种负载、33 个文件全部相同；`levels` 模式会触发后台压缩，文件
+  编号与分层布局允许不同，只要求读取结果一致。
+- `scripts/run_interop.sh`：把一方引擎生成的目录交给另一方继续
+  写入/更新（多阶段），并校验物理存储前提；`RUN_C_TEST=1` 额外用
+  **未经修改的官方 `leveldb/db/c_test.c`** 直接链接 kvdb 运行。
+- `tests/test_format_extra.c`：把 varint/fixed/长度前缀、内部键 trailer、
+  VersionEdit 标签、块句柄与 footer 的官方编码写成硬编码字节黄金值，
+  不需要真实 leveldb 也能守住格式契约（并覆盖截断/损坏语料）。
 
 ## 测试套件（移植自 LevelDB）
 
@@ -124,6 +162,9 @@ POSIX 后端已在 MSYS2 环境（`pacman -S make gcc` 后直接 `make`）
 | test_table.c | table_test | 5000 键往返、Seek/Prev、InternalGet+bloom、ApproximateOffset、块构建/双向迭代、filter block |
 | test_db.c | db_test | 读写、PutDeleteGet、快照（多快照+隐藏）、迭代器（空/单/多/删除/Prev/多版本）、压缩触发、跨压缩删除、CompactRange、恢复、序列号恢复、属性、ApproximateSizes、DestroyDB、Repair |
 | test_c_api.c | c_test | 不存在库打开失败、PutGetDelete、WriteBatch、迭代器、快照、属性、CompactRange、bloom 选项、ApproximateSizes、版本号 |
+| test_format_extra.c | coding/dbformat/version_edit/format 的字节层 | 官方编码硬编码黄金值、块句柄/footer/restart 布局、截断与损坏语料、双向 Seek |
+| test_recovery_extra.c | log_test、recovery_test、db_test（Snapshot/DeletionMarkers） | WAL 尾部截断（半头/半负载）、CRC 损坏跳块、非零 `initial_offset`、短块尾后追加、多日志恢复取最大序列、快照跨同步压缩存活 |
+| test_api_extra.c | c_test 之外的公共 API 语义 | 缺失键 `err==NULL && len==0` 且不覆盖既有错误、空/二进制键值、WriteBatch 顺序与 append/clear、快照跨压缩+重开、C 布隆桥接、自定义比较器顺序与 name 不匹配拒绝打开、Get 释放 DB 锁的线程回归、2 写 2 读 120 轮屏障并发 |
 
 ## 已知限制
 

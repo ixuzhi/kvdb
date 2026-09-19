@@ -1,5 +1,8 @@
-# Build artifacts
+# Build artifacts. build_*/ covers the per-toolchain OBJDIRs the README and
+# scripts pass (build_mingw, build_san) - the archive keeps stale members
+# across targets, so those directories are never shared and never committed.
 build/
+build_*/
 _tools/
 *.o
 *.a

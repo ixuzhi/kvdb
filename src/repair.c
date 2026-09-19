@@ -292,7 +292,7 @@ ldb_status ldb_repair_db(const ldb_options* options, const char* dbname) {
     r.options.block_cache->destroy(r.options.block_cache);
   }
   if (r.owns_info_log && r.options.info_log) {
-    free(r.options.info_log);
+    ldb_logger_destroy(r.options.info_log);
   }
   return s;
 }

@@ -141,6 +141,9 @@ static inline ldb_status ldb_status_from_errno(int e, const char* context) {
 // ------------------------------------------------------------------ logging
 typedef struct ldb_logger {
   void (*logv)(struct ldb_logger*, const char* fmt, va_list ap);
+  // Releases whatever the env acquired in new_logger (a FILE*, a handle).
+  // NULL means the logger owns nothing and is freed by the caller.
+  void (*destroy)(struct ldb_logger*);
 } ldb_logger;
 
 void ldb_log(ldb_logger* info_log, const char* fmt, ...);
@@ -434,6 +437,9 @@ uint64_t ldb_env_now_micros(ldb_env* e);
 void ldb_env_sleep_for_microseconds(ldb_env* e, int64_t us);
 ldb_status ldb_env_get_test_directory(ldb_env* e, ldb_buffer* path);
 ldb_status ldb_env_new_logger(ldb_env* e, const char* f, ldb_logger** out);
+// Calls the logger's own destroy hook, which is the only thing that can hand
+// back the OS file the env opened for it.
+void ldb_logger_destroy(ldb_logger* log);
 
 ldb_status ldb_write_string_to_file_sync(ldb_env* env, const ldb_buffer* data,
                                          const char* fname);
@@ -514,6 +520,10 @@ typedef struct ldb_arena {
 void ldb_arena_init(ldb_arena* a);
 void ldb_arena_destroy(ldb_arena* a);
 char* ldb_arena_allocate(ldb_arena* a, size_t bytes);
+// Mirrors Arena::AllocateAligned: callers that cast the result to a pointer
+// type (skiplist nodes) must not get a bump-pointer address of arbitrary
+// alignment.
+char* ldb_arena_allocate_aligned(ldb_arena* a, size_t bytes);
 size_t ldb_arena_memory_usage(const ldb_arena* a);
 
 // ------------------------------------------------------------------ cache

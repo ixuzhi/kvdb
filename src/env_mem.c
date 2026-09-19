@@ -427,12 +427,19 @@ static ldb_status mem_get_test_directory(ldb_env* base, ldb_buffer* path) {
   return ldb_status_ok();
 }
 
+static void mem_logger_destroy(ldb_logger* logger) {
+  mem_logger* l = (mem_logger*)logger;
+  ldb_buffer_destroy(&l->log);
+  free(l);
+}
+
 static ldb_status mem_new_logger(ldb_env* base, const char* fname,
                                  ldb_logger** out) {
   (void)base;
   (void)fname;
   mem_logger* l = (mem_logger*)calloc(1, sizeof(mem_logger));
   l->base.logv = mem_logv;
+  l->base.destroy = mem_logger_destroy;
   ldb_buffer_init(&l->log);
   *out = &l->base;
   return ldb_status_ok();

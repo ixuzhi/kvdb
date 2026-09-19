@@ -438,6 +438,42 @@ TEST(hash, Deterministic) {
   CHECK_NE(h1, ldb_hash("abc", 3, 1));
 }
 
+// =================================================================== arena
+TEST(arena, AlignedAllocationsSurviveOddSizedNeighbours) {
+  // Skiplist nodes are cast straight out of the arena's bump pointer, and
+  // memtable entries take an odd number of bytes before them, so the aligned
+  // entry point must re-align rather than hand back a pointer-sized cast that
+  // traps on stricter alignment.
+  ldb_arena a;
+  ldb_arena_init(&a);
+  // Height 3, i.e. what node_new asks for: the header plus (height-1) more
+  // links. Asking for less would make the writes below the test's own bug.
+  const size_t node_bytes =
+      sizeof(ldb_skiplist_node) + 2 * sizeof(ldb_skiplist_node*);
+  for (size_t odd = 1; odd <= 33; odd += 2) {
+    char* raw = ldb_arena_allocate(&a, odd);
+    CHECK(raw != NULL);
+    char* node = ldb_arena_allocate_aligned(&a, node_bytes);
+    CHECK_EQ(0, (uintptr_t)node % 8);
+    ldb_skiplist_node* n = (ldb_skiplist_node*)node;
+    n->key = "x";
+    n->next[0] = NULL;
+    n->next[1] = n;
+    n->next[2] = n;
+    char* again = ldb_arena_allocate_aligned(&a, 9);
+    CHECK_EQ(0, (uintptr_t)again % 8);
+    // The aligned request left nothing of itself behind for the next one.
+    CHECK((uintptr_t)again >= (uintptr_t)node + node_bytes);
+  }
+  // Requests too large for the leftover block space take the fallback path,
+  // which returns freshly allocated memory.
+  char* big = ldb_arena_allocate_aligned(&a, 2048);
+  CHECK_EQ(0, (uintptr_t)big % 8);
+  memset(big, 0x5a, 2048);
+  CHECK_GT(ldb_arena_memory_usage(&a), 2048u);
+  ldb_arena_destroy(&a);
+}
+
 // =================================================================== snappy_test
 TEST(snappy, RoundTrip) {
   const char* samples[] = {
@@ -445,7 +481,7 @@ TEST(snappy, RoundTrip) {
       "a",
       "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "LevelDB is a fast key-value storage engine written at Google.",
-      "the quick brown fox jumps over the lazy dog. "
+      "the quick brown fox jumps over the lazy dog. ",
       "the quick brown fox jumps over the lazy dog. "};
   for (size_t i = 0; i < sizeof(samples) / sizeof(samples[0]); i++) {
     const char* src = samples[i];

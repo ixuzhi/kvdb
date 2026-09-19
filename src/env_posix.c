@@ -357,6 +357,17 @@ static void file_logv(ldb_logger* logger, const char* fmt, va_list ap) {
   free(buf);
 }
 
+// Mirrors ~POSIXFileLogger in leveldb: the FILE* belongs to the logger.
+static void file_logger_destroy(ldb_logger* logger) {
+  typedef struct file_logger {
+    ldb_logger base;
+    FILE* f;
+  } file_logger;
+  file_logger* l = (file_logger*)logger;
+  fclose(l->f);
+  free(l);
+}
+
 static ldb_status posix_new_logger(ldb_env* env, const char* fname,
                                    ldb_logger** out) {
   (void)env;
@@ -368,6 +379,7 @@ static ldb_status posix_new_logger(ldb_env* env, const char* fname,
   if (f == NULL) return posix_status(fname);
   file_logger* l = (file_logger*)malloc(sizeof(file_logger));
   l->base.logv = file_logv;
+  l->base.destroy = file_logger_destroy;
   l->f = f;
   *out = &l->base;
   return ldb_status_ok();

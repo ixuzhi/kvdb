@@ -85,6 +85,9 @@ ldb_status ldb_env_get_test_directory(ldb_env* e, ldb_buffer* path) {
 ldb_status ldb_env_new_logger(ldb_env* e, const char* f, ldb_logger** out) {
   return e->vtbl->new_logger(e, f, out);
 }
+void ldb_logger_destroy(ldb_logger* log) {
+  if (log != NULL && log->destroy != NULL) log->destroy(log);
+}
 
 ldb_status ldb_write_string_to_file_sync(ldb_env* env, const ldb_buffer* data,
                                          const char* fname) {

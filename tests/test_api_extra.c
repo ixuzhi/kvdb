@@ -336,6 +336,40 @@ TEST(api_extra, ComparatorNameMismatchRejectsOpen) {
   CHECK_EQ(1, b.destroyed);
 }
 
+// DestroyDB must be able to remove the database while this very process is
+// still alive, so every handle the previous open took has to be back. Windows
+// refuses to delete or rename a file it still has open, which turns a leaked
+// info-log handle into an IO error on the *next* open.
+TEST(api_extra, DestroyDbThenReopenInSameProcess) {
+  api_fixture f;
+  api_init(&f, "api_extra_destroy_reopen");
+  api_open(&f);
+  api_put(&f, "keep", 4, "value", 5);
+  for (int round = 0; round < 3; round++) {
+    leveldb_close(f.db);
+    f.db = NULL;
+    char* err = NULL;
+    leveldb_destroy_db(f.options, f.path, &err);
+    int ok = err == NULL;
+    leveldb_free(err);
+    CHECK(ok);
+    leveldb_options_set_create_if_missing(f.options, 1);
+    api_open(&f);
+    size_t len = 1;
+    err = NULL;
+    char* got = leveldb_get(f.db, f.ro, "keep", 4, &len, &err);
+    // The database is brand new again: nothing of the previous round survives.
+    ok = err == NULL && got == NULL;
+    leveldb_free(got);
+    leveldb_free(err);
+    CHECK(ok);
+    api_put(&f, "keep", 4, "value", 5);
+    api_compact(&f);
+    CHECK(api_matches(&f, "keep", 4, "value", 5));
+  }
+  api_done(&f);
+}
+
 // port.h deliberately has detached threads only. The completion handshake
 // acts as a lifetime fence: after the final unlock a worker never touches
 // shared state again. No harness assertion/longjmp is allowed in a worker,

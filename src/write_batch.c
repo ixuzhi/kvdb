@@ -31,7 +31,7 @@ static void wb_maybe_init(ldb_write_batch* b) {
   }
 }
 
-const ldb_slice ldb_write_batch_contents(const ldb_write_batch* b) {
+ldb_slice ldb_write_batch_contents(const ldb_write_batch* b) {
   return ldb_buffer_slice((ldb_buffer*)&b->rep);
 }
 

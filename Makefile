@@ -1,5 +1,6 @@
 # Makefile for kvdb - a LevelDB-compatible storage engine in C
 CC      := gcc
+AR      := ar
 CFLAGS  := -std=c11 -O2 -Wall -Wextra -Wno-unused-parameter -g
 INCLUDES := -Iinclude -Isrc
 LDFLAGS  :=
@@ -27,7 +28,11 @@ TEST_SRCS := tests/test_main.c tests/test_util.c tests/test_cache.c \
 # Windows but targets the POSIX emulation (no _WIN32, no windows.h).
 # Must run before LIB_OBJS below expands LIB_SRCS.
 TARGET_TRIPLET := $(shell $(CC) -dumpmachine 2>/dev/null)
-ifneq (,$(findstring mingw,$(TARGET_TRIPLET)))
+# Two Windows triplets: mingw-w64 gcc (x86_64-w64-mingw32) and MSYS2's clang
+# (x86_64-w64-windows-gnu). Only the former links statically - clang's ASan
+# runtime is delivered as a DLL that must stay dynamically resolvable.
+ifneq (,$(findstring windows,$(TARGET_TRIPLET)))
+else ifneq (,$(findstring mingw,$(TARGET_TRIPLET)))
   LDFLAGS += -static
 else
   LDFLAGS += -lpthread
@@ -67,8 +72,10 @@ $(TESTBIN): $(TEST_OBJS) $(LIB)
 test: $(TESTBIN)
 	./$(TESTBIN)
 
+# Removes this Makefile's own outputs only. `rm -rf $(OBJDIR)` was the earlier
+# form, and with the default OBJDIR=build it also deleted the cross-engine
+# evidence trees (build/interop/*, build/san-runs/*) that nothing else can
+# reproduce. rmdir succeeds just on an emptied, otherwise-unused object dir.
 clean:
-	rm -rf $(OBJDIR) $(LIB) $(TESTBIN)
-
-$(AR) := ar
-export AR
+	rm -f $(LIB_OBJS) $(TEST_OBJS) $(LIB) $(TESTBIN) $(TESTBIN).exe
+	-rmdir $(OBJDIR)/tests $(OBJDIR) 2>/dev/null

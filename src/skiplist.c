@@ -27,7 +27,8 @@ static ldb_skiplist_node* node_new(ldb_skiplist* l, const char* key,
                                    int height) {
   size_t bytes = sizeof(ldb_skiplist_node) +
                  sizeof(ldb_skiplist_node*) * (size_t)(height - 1);
-  ldb_skiplist_node* n = (ldb_skiplist_node*)ldb_arena_allocate(l->arena, bytes);
+  ldb_skiplist_node* n =
+      (ldb_skiplist_node*)ldb_arena_allocate_aligned(l->arena, bytes);
   n->key = key;
   for (int i = 0; i < height; i++) n->next[i] = NULL;
   return n;

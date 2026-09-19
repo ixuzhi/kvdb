@@ -851,6 +851,28 @@ char* ldb_arena_allocate(ldb_arena* a, size_t bytes) {
   return arena_allocate_fallback(a, bytes);
 }
 
+char* ldb_arena_allocate_aligned(ldb_arena* a, size_t bytes) {
+  assert(bytes > 0);
+  const size_t align = (sizeof(void*) > 8) ? sizeof(void*) : 8;
+  size_t current_mod = (size_t)((uintptr_t)a->alloc_ptr & (align - 1));
+  size_t slop = (current_mod == 0 ? 0 : align - current_mod);
+  size_t needed = bytes + slop;
+  char* result;
+  if (needed <= a->alloc_bytes_remaining) {
+    result = a->alloc_ptr + slop;
+    a->alloc_ptr += needed;
+    a->alloc_bytes_remaining -= needed;
+    a->memory_usage += bytes;
+  } else {
+    // Freshly malloc'ed blocks are the same guarantee leveldb relies on here:
+    // malloc returns memory suited to any fundamental type, so it is already
+    // aligned and needs no slop.
+    result = arena_allocate_fallback(a, bytes);
+  }
+  assert(((uintptr_t)result & (align - 1)) == 0);
+  return result;
+}
+
 size_t ldb_arena_memory_usage(const ldb_arena* a) { return a->memory_usage; }
 
 // =================================================================== uint64 set

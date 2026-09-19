@@ -125,7 +125,7 @@ void ldb_db_impl_destroy(ldb_db_impl* impl) {
   ldb_table_cache_destroy(impl->table_cache);
 
   if (impl->owns_info_log && impl->options.info_log) {
-    free(impl->options.info_log);
+    ldb_logger_destroy(impl->options.info_log);
   }
   if (impl->owns_cache && impl->options.block_cache) {
     impl->options.block_cache->destroy(impl->options.block_cache);

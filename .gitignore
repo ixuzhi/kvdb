@@ -7,3 +7,6 @@ _tools/
 
 # Test temp dirs
 leveldbtest-*/
+
+# Agent session state
+.zcode/

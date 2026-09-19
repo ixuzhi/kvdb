@@ -171,7 +171,9 @@ MSYSTEM=CLANG64 bash scripts/run_sanitizers.sh  # 以上证据再过一遍 ASan/
   `-fsanitize=address,undefined -fno-sanitize-recover=all` 下重跑一遍
   （127 例 + 官方 `c_test` + `golden_driver` 的 create/verify，可选
   `OFFICIAL_DBS=` 指向官方引擎写出的目录做验证）。任何一条 sanitizer
-  报告都会让进程直接终止，所以"退出码为 0"就是"零报告"。
+  报告都会让进程直接终止，所以"退出码为 0"就是"零报告"。这一轮暴露并修复
+  了跳表节点未对齐与 info-log 句柄泄漏两个缺陷，逐文件说明见
+  `doc/07-ASan与UBSan内存安全验证.md`。
 - `tests/test_format_extra.c`：把 varint/fixed/长度前缀、内部键 trailer、
   VersionEdit 标签、块句柄与 footer 的官方编码写成硬编码字节黄金值，
   不需要真实 leveldb 也能守住格式契约（并覆盖截断/损坏语料）。

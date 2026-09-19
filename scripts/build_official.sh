@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # Build the OFFICIAL LevelDB static library from the pinned submodule source
-# with the MSYS2 (POSIX) toolchain, and cache it for reuse by the golden
-# byte-comparison runner.
+# with a POSIX toolchain (MSYS2 /usr/bin, or a native Linux gcc), and cache it
+# for reuse by the golden byte-comparison runner.
 #
 # Run from Git Bash with:
 #   /d/ProgramFiles/msys64/usr/bin/bash.exe -lc 'bash <this script>'
+# or on native Linux with:
+#   bash <this script>
 # Last line of stdout is the absolute path of the produced archive.
 #
 # The source list and the port_config probes mirror the pinned CMakeLists.txt
@@ -26,8 +28,15 @@ commit=$(git -C "$REPO/leveldb" rev-parse HEAD)
 # Windows checkouts carry CRLF; normalize only for this read-only check.
 git -c core.autocrlf=true -C "$REPO/leveldb" diff --quiet HEAD -- || {
   printf 'Official tracked files modified; refusing reference build\n' >&2; exit 2; }
-[[ $("$CC" -dumpmachine) == x86_64-pc-cygwin ]] || {
-  printf 'Expected MSYS2 /usr/bin POSIX compiler, got %s\n' "$("$CC" -dumpmachine)" >&2; exit 2; }
+[[ $("$CC" -dumpmachine) == *-cygwin || $("$CC" -dumpmachine) == *linux* ]] || {
+  printf 'Expected a POSIX compiler (MSYS2 /usr/bin gcc or a native Linux gcc), got %s\n' "$("$CC" -dumpmachine)" >&2; exit 2; }
+# Checked by path, not by `command -v`: the whole script pins absolute /usr/bin
+# tools, and a missing C++ compiler is the normal state after the verification
+# packages have been uninstalled (see doc/08 §3).
+[[ -x "$CXX" ]] || {
+  printf '%s not found - the official reference library is C++ and needs a compiler.\n' "$CXX" >&2
+  printf 'Debian/Ubuntu: apt-get install g++   MSYS2: pacman -S mingw-w64-ucrt-x86_64-gcc\n' >&2
+  exit 2; }
 
 STAMP="$OUT/.built-$commit-$("$CC" -dumpversion)-$("$CXX" -dumpversion)"
 if [[ -f "$STAMP" && -f "$OUT/lib/libleveldb_official.a" ]]; then

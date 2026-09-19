@@ -14,10 +14,15 @@
 | MSYS2 gcc 15.2（`MSYSTEM=MSYS`） | `x86_64-pc-cygwin` | 无：MSYS2 不提供 `mingw-w64-x86_64-sanitizers` 这个包，`libasan`/`libubsan` 都拿不到 |
 | MinGW64 gcc 16.1（`MSYSTEM=MINGW64`） | `x86_64-w64-mingw32` | 同上 |
 | MSYS2 clang 22.1.8（`MSYSTEM=CLANG64`） | `x86_64-w64-windows-gnu` | **有**：`libclang_rt.asan_dynamic-x86_64.dll` 随工具链交付 |
+| 原生 Linux gcc 12.2（Debian 12，2026-09-19 补） | `x86_64-linux-gnu` | **有，且不必换编译器**：`/usr/lib/gcc/x86_64-linux-gnu/12/` 下 `libasan`/`libubsan`/`libtsan` 齐备，`libasan.so.8` 还带 LeakSanitizer |
 
 也就是说这不是"换个编译选项"那么轻：为了让这轮验证可跑，Makefile 必须先能
 正确识别 clang 的目标三元组（见 §3 的 Makefile 改动），否则它会被当成 POSIX
 目标去编 `env_posix.c`。
+
+> 本节标题里的"只有 clang64"仅对 **Windows 主机**成立。次日在原生 Linux 上复跑时，
+> `scripts/run_sanitizers.sh` 已改为按宿主自动选编译器（Windows 目标→clang，其余→gcc），
+> 并在那里发现了 Windows 侧根本看不见的一处 UB（P0-10，见 §3.6 与 doc/08）。
 
 ## 2. 这一轮验证跑了什么
 
@@ -101,6 +106,16 @@ Windows 上 `DestroyDB` 之后同路径重开报 win32 error 32（共享冲突�
 | `tests/test_api_extra.c:343` | `api_extra.DestroyDbThenReopenInSameProcess`：同一进程内 3 轮 close→DestroyDB→重开→确认已清空→再写→压缩 |
 | `scripts/run_sanitizers.sh` | 本文 §2 的那条命令，可复现、带留档 |
 
+### 3.6 原生 Linux 复跑逼出的 P0-10（`get_range2` 向 `memcpy` 交 NULL）
+
+| 文件 | 改动 | 为什么 Windows 侧看不出来 |
+|---|---|---|
+| `src/version_set.c:1442` | `get_range2` 的两次 `memcpy` 各加 `n1 > 0`/`n2 > 0` 守卫。`SetupOtherInputs` 在该层无其它文件时传 `NULL + 0`，而向 `memcpy` 交 NULL 即使长度为 0 也是 UB | glibc 把 `memcpy` 形参声明为 `nonnull`，UBSan 的 `nonull-argument` 检查据此判罚；Windows 侧 libc++/msvcrt 没有该属性声明，同一份代码静默通过。官方 C++ 版是 `std::vector` 合并，从不交出空基址——这条 UB 属 C 重写引入 |
+| `Makefile:6` | 新增 `SANFLAGS` 通道：命令行 `make CFLAGS=…` 会**同时吞掉** Makefile 里的 `+=` 追加（POSIX 分支的 `-D_GNU_SOURCE`、`-lpthread` 会静默消失，`make -n` 可实证），改为在平台分支之后 `+= $(SANFLAGS)` | Windows 分支本来什么都不追加，所以这个覆盖语义在 MSYS2 上从未暴露 |
+| `scripts/run_sanitizers.sh` | `CC` 按宿主自动选（Windows 目标→clang，其余→gcc）；`-D_GNU_SOURCE` 只加给 `*linux*` 下脚本自己编的 `c_test.o`/`golden_driver.o`；`TMP`/`cygpath` 兜底块收窄到 Windows/cygwin/mingw 目标（POSIX 上原来会退化成 `TMP=.`，把留档写进仓库）；leak 行按平台分别陈述并支持 `SAN_DETECT_LEAKS=1` | — |
+| `scripts/build_official.sh`、`scripts/run_interop.sh` | 编译器断言从"必须 `x86_64-pc-cygwin`"放宽为 `*-cygwin` 或 `*linux*`；`KVDB` 路径可 `KVDB_LIB=` 覆盖 | 旧断言让 Linux 上连参考库都拒绝构建 |
+| `scripts/run_golden.sh`、`scripts/run_interop.sh` | 新增归档时效守卫：`src/`、`include/` 里有比归档更新的 `.c/.h` 即 `exit 2` | 首轮 L1 拿 09‑13 的旧 `build/libleveldb.a` 跑，报出 4 个"伪 Linux 缺陷"（`sst-bloom`/`sst-bigblock` SIGSEGV、`edge` 断言、`tomb` 点查 NotFound）；换当前库立即全绿。守卫的负向对照已做：把归档 `touch` 到过去时间后两条腿都拒绝运行 |
+
 ## 4. 负向对照：怎么确认新用例真能抓到缺陷
 
 两条修复各自做了"摘掉修复、看新用例是否恰好失败"的对照。对照必须在
@@ -133,7 +148,11 @@ Windows 上 `DestroyDB` 之后同路径重开报 win32 error 32（共享冲突�
 - **泄漏**：Windows 版 ASan 不带 LeakSanitizer，`ASAN_OPTIONS=detect_leaks=1`
   会在 `main` 之前直接退出并打印 "detect_leaks is not supported on this
   platform"（脚本把这一行原样记进日志）。P0-9 这类"句柄/缓冲未归还"目前只能
-  靠 API 行为反证。补齐办法是在 Linux/macOS 上跑同一脚本，那边默认带 LSan。
+  靠 API 行为反证。**2026-09-19 原生 Linux 复跑已把这条的"做不到"改成"能做但暂未做"**：
+  gcc 的 `libasan.so.8` 带 LSan，负向探针能报出 8 字节泄漏，脚本另加
+  `SAN_DETECT_LEAKS=1` 开关；真正跑一遍并把结论入账记为 doc/08 §9 的 T1。
+  （做该负向对照时注意 `-O1` 会把死掉的 `malloc`/写整条消除，探针要 `-O0` +
+  `volatile`，否则得到的是"没报"的假象——本轮先踩了这个坑。）
 - **`-fno-sanitize-recover=all` 会掩盖后续结果**：首次遇到 UBSan 报告就终止，
   所以"枚举全部问题"需要临时换一份可恢复的构建单独跑一遍。本文两处缺陷都是
   这样找齐的，而不是指望一次 fatal 构建列全。

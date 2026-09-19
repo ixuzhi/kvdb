@@ -4,6 +4,12 @@ AR      := ar
 CFLAGS  := -std=c11 -O2 -Wall -Wextra -Wno-unused-parameter -g
 INCLUDES := -Iinclude -Isrc
 LDFLAGS  :=
+# Extra flags (sanitizers, a different -O level) for callers such as
+# scripts/run_sanitizers.sh. Passing CFLAGS/LDFLAGS on the make command line
+# instead *replaces* them, and a command-line variable also swallows the `+=`
+# appends below - so the POSIX feature-test macro and -lpthread silently
+# vanish. SANFLAGS keeps the caller's input additive.
+SANFLAGS :=
 
 SRCDIR := src
 OBJDIR := build
@@ -39,6 +45,11 @@ else
   LIB_SRCS += $(SRCDIR)/env_posix.c
   CFLAGS += -D_GNU_SOURCE
 endif
+
+# Appended after the platform branch so the caller's -O1 wins over the default
+# -O2 (the compiler honours the last -O on the command line).
+CFLAGS  += $(SANFLAGS)
+LDFLAGS += $(SANFLAGS)
 
 LIB_OBJS := $(patsubst $(SRCDIR)/%.c,$(OBJDIR)/%.o,$(LIB_SRCS))
 TEST_OBJS := $(patsubst tests/%.c,$(OBJDIR)/tests/%.o,$(filter tests/%,$(TEST_SRCS)))

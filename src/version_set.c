@@ -1444,8 +1444,12 @@ static void get_range2(ldb_version_set* vs, ldb_file_meta** inputs1,
                        ldb_buffer* smallest, ldb_buffer* largest) {
   size_t n = n1 + n2;
   ldb_file_meta** all = (ldb_file_meta**)malloc(sizeof(ldb_file_meta*) * n);
-  memcpy(all, inputs1, sizeof(ldb_file_meta*) * n1);
-  memcpy(all + n1, inputs2, sizeof(ldb_file_meta*) * n2);
+  // A caller with an empty level passes NULL with count 0 (the official C++
+  // version merges std::vectors and never hands out a null base). Passing NULL
+  // to memcpy is UB even for size 0, and glibc declares the arguments nonnull:
+  // UBSan aborts here on Linux, and an inlined memcpy may assume it too.
+  if (n1 > 0) memcpy(all, inputs1, sizeof(ldb_file_meta*) * n1);
+  if (n2 > 0) memcpy(all + n1, inputs2, sizeof(ldb_file_meta*) * n2);
   get_range(vs, all, n, smallest, largest);
   free(all);
 }

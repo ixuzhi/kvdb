@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Run from Git Bash with:
 # /d/ProgramFiles/msys64/usr/bin/bash.exe -lc 'bash /d/code/kvdb/scripts/run_interop.sh'
+# or on native Linux with:  bash scripts/run_interop.sh
 # No cmake, make, clean, submodule edits, or main object/library writes.
 # Reference sources/settings mirror the pinned CMakeLists.txt and port config.
 set -euo pipefail
@@ -23,12 +24,26 @@ commit=$(git -C "$REPO/leveldb" rev-parse HEAD)
 # Windows checkout has CRLF; normalize only for this read-only integrity check.
 git -c core.autocrlf=true -C "$REPO/leveldb" diff --quiet HEAD -- || { printf 'Official tracked files modified; refusing reference build\n'; exit 2; }
 printf 'Official commit: %s\n' "$commit"
+# Fail here rather than at the first "$CXX" line below: this script builds and
+# links the reference engine itself, so a missing C++ compiler (the normal state
+# once the verification packages are uninstalled - see doc/08 §3) is a
+# precondition failure, not an engine failure.
+[[ -x "$CXX" ]] || {
+  printf '%s not found - the official reference engine is C++ and needs a compiler.\n' "$CXX"
+  printf 'Debian/Ubuntu: apt-get install g++   MSYS2: pacman -S mingw-w64-ucrt-x86_64-gcc\n' >&2
+  exit 2; }
 "$CC" --version
 "$CXX" --version
 "$AR" --version
-[[ $("$CC" -dumpmachine) == x86_64-pc-cygwin ]] || { printf 'Expected MSYS2 /usr/bin POSIX compiler\n'; exit 2; }
-KVDB="$REPO/build/libleveldb.a"
+[[ $("$CC" -dumpmachine) == *-cygwin || $("$CC" -dumpmachine) == *linux* ]] || { printf 'Expected a POSIX compiler (MSYS2 /usr/bin gcc or native Linux gcc)\n'; exit 2; }
+KVDB=${KVDB_LIB:-$REPO/build/libleveldb.a}
 [[ -f "$KVDB" ]] || { printf 'Missing prebuilt %s; build it separately first\n' "$KVDB"; exit 2; }
+# Same staleness trap as scripts/run_golden.sh: never interop-test an archive
+# that predates the sources it claims to contain.
+if [[ -n "$(find "$REPO/src" "$REPO/include" -name '*.[ch]' -newer "$KVDB" -print -quit 2>/dev/null)" ]]; then
+  printf '%s is older than the sources in src/; run make first\n' "$KVDB" >&2
+  exit 2
+fi
 # Snapshot the exact prebuilt library, avoiding concurrent rebuild races.
 cp "$KVDB" "$RUN/libleveldb_kvdb.a"
 sha256sum "$RUN/libleveldb_kvdb.a" "$REPO/tests/interop/interop_driver.c" "$REPO/scripts/run_interop.sh" > "$RUN/input.sha256"

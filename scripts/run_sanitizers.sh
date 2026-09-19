@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Memory-safety leg for kvdb: build the whole engine with clang's AddressSanitizer
-# and UndefinedBehaviorSanitizer, then run three consumers over it:
+# Memory-safety leg for kvdb: build the whole engine with AddressSanitizer and
+# UndefinedBehaviorSanitizer, then run three consumers over it:
 #
 #   1. the ported unit suite (tests/*);
 #   2. the UNMODIFIED official leveldb/db/c_test.c conformance test;
@@ -8,21 +8,48 @@
 #      databases written by the real C++ engine (see OFFICIAL_DBS below), which
 #      exercises the reader over foreign bytes under the sanitizer.
 #
-# Why clang and not gcc: MSYS2 ships no GCC sanitizer runtime for any Windows
-# target (pacman -S mingw-w64-x86_64-sanitizers does not exist), so clang64 is
-# the only local toolchain that can build these checks at all.
+# Which compiler: MSYS2 ships no GCC sanitizer runtime for any Windows target
+# (pacman -S mingw-w64-x86_64-sanitizers does not exist), so there clang64 is
+# the only toolchain that can build these checks. On a native Linux host the
+# GCC runtime is present, so gcc is the default there - and unlike the Windows
+# build, glibc ASan carries LeakSanitizer (see SAN_DETECT_LEAKS below).
 #
 # Run from Git Bash with:
 #   MSYSTEM=CLANG64 /d/ProgramFiles/msys64/usr/bin/bash -c \
 #     'export PATH=/clang64/bin:/usr/bin:/bin; bash /d/code/kvdb/scripts/run_sanitizers.sh'
+# or on native Linux with:
+#   bash scripts/run_sanitizers.sh
 #
 # Env: OFFICIAL_DBS=<golden evidence dir> also verifies the official engine's
-#      files (produced by scripts/run_golden.sh); MODES, SAN, KEEP=1.
+#      files (produced by scripts/run_golden.sh); MODES, SAN, KEEP=1,
+#      SAN_DETECT_LEAKS=1 turns LeakSanitizer on (unsupported on Windows).
 set -uo pipefail
 REPO=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-CC=${CC:-clang}
+# Default compiler follows the host: Windows cross targets need clang, a POSIX
+# host toolchain already carries its own sanitizer runtimes.
+if [[ -z "${CC:-}" ]]; then
+  case "$(/usr/bin/gcc -dumpmachine 2>/dev/null)" in
+    *cygwin*|*mingw*|*windows*) CC=clang ;;
+    *) CC=gcc ;;
+  esac
+fi
 SAN=${SAN:--fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all}
 CFLAGS_SAN="-std=c11 -O1 -g -Wall -Wextra -Wno-unused-parameter $SAN"
+TRIPLE=$("$CC" -dumpmachine 2>/dev/null)
+# glibc hides POSIX declarations under -std=c11 unless the feature-test macro is
+# set; the Makefile does this for the library, the script must do it for the
+# standalone consumers it compiles itself. Cygwin is exempt (its headers want
+# the macro left alone) and Windows targets must not see it at all.
+POSIX_DEFS=
+case "$TRIPLE" in
+  *linux*) POSIX_DEFS=-D_GNU_SOURCE ;;
+esac
+# Only the Windows backend needs TMP/TEMP pointed at a Win32 path; a POSIX host
+# resolves its scratch directory through env_posix.c.
+ON_WINDOWS=0
+case "$TRIPLE" in
+  *windows*|*mingw*|*cygwin*) ON_WINDOWS=1 ;;
+esac
 OBJDIR=${OBJDIR:-build/san}
 MODES=${MODES:-"sst sst-bloom sst-restart1 sst-bigblock wal wal-big wal-frag edge tomb levels"}
 cd "$REPO" || exit 2
@@ -31,9 +58,14 @@ cd "$REPO" || exit 2
 # clang appear. Check that before anything on disk is removed.
 if ! command -v "$CC" >/dev/null 2>&1; then
   printf '%s: %s is not on PATH.\n' "$0" "$CC" >&2
-  printf 'Open an "MSYS2 CLANG64" shell, or invoke it directly:\n' >&2
-  printf '  MSYSTEM=CLANG64 /path/to/msys64/usr/bin/bash -c %s\n' \
-         "'export PATH=/clang64/bin:/usr/bin:/bin; cd $REPO && bash scripts/run_sanitizers.sh'" >&2
+  if [[ $CC == clang ]]; then
+    printf 'Open an "MSYS2 CLANG64" shell, or invoke it directly:\n' >&2
+    printf '  MSYSTEM=CLANG64 /path/to/msys64/usr/bin/bash -c %s\n' \
+           "'export PATH=/clang64/bin:/usr/bin:/bin; cd $REPO && bash scripts/run_sanitizers.sh'" >&2
+  else
+    printf 'This leg needs a compiler that ships a sanitizer runtime (Debian: apt-get install gcc).\n' >&2
+    printf 'On MSYS2 only clang has one: CC=clang with an "MSYS2 CLANG64" shell.\n' >&2
+  fi
   exit 2
 fi
 # Evidence lands outside OBJDIR on purpose: the archive must be wiped before a
@@ -49,18 +81,20 @@ printf 'Artifacts: %s\n' "$RUN"
 # API falls through to C:\Windows when TMP/TEMP/TMPDIR are all unset - which an
 # MSYS2 env shell does leave unset. Every real-filesystem test then fails on
 # directory permissions rather than on anything in the engine.
-if [[ -z "${TMP:-}" && -z "${TEMP:-}" && -z "${TMPDIR:-}" ]]; then
+if [[ $ON_WINDOWS == 1 && -z "${TMP:-}" && -z "${TEMP:-}" && -z "${TMPDIR:-}" ]]; then
   TW=$(/usr/bin/cygpath -w /tmp 2>/dev/null) || TW=.
   export TMP="$TW" TEMP="$TW"
   printf 'TMP was unset; pointing the native backend at %s\n' "$TW"
 fi
 
-printf 'toolchain: %s\n' "$("$CC" --version | head -1) [$("$CC" -dumpmachine)]"
+printf 'toolchain: %s\n' "$("$CC" --version | head -1) [$TRIPLE]"
 result=0
 note() { printf '%-22s %-8s %s\n' "$1" "$2" "$3"; }
 
-make -j4 CC="$CC" OBJDIR="$OBJDIR" BINDIR="$OBJDIR" \
-  CFLAGS="$CFLAGS_SAN" LDFLAGS="-fsanitize=address,undefined" \
+# SANFLAGS, not CFLAGS: a command-line `make CFLAGS=...` replaces the Makefile's
+# flags AND swallows its `+=` appends, which would drop -D_GNU_SOURCE and
+# -lpthread from the POSIX branch.
+make -j4 CC="$CC" OBJDIR="$OBJDIR" BINDIR="$OBJDIR" SANFLAGS="$CFLAGS_SAN" \
   > "$RUN/build.log" 2>&1
 if [[ $? -ne 0 ]]; then
   note 'sanitized build' 'FAIL' "see $RUN/build.log"
@@ -73,9 +107,16 @@ note 'sanitized build' 'PASS' "$OBJDIR/libleveldb.a"
 # code here means no report at all, not merely an ignored one.
 export ASAN_OPTIONS=detect_leaks=0
 export UBSAN_OPTIONS=print_stacktrace=1
-# detect_leaks=1 is not merely ignored on this platform, it stops the process
-# before main(), so leaks cannot be checked with any local Windows toolchain.
-printf 'leak check: %s\n' "$(ASAN_OPTIONS=detect_leaks=1 "$OBJDIR/kvdb_tests" nosuchtest 2>&1 | head -1)"
+# detect_leaks=1 is not merely ignored on Windows, it stops the process before
+# main(), so leaks cannot be checked with any local Windows toolchain. On Linux
+# glibc the same option is live, and SAN_DETECT_LEAKS=1 turns it on for every
+# consumer below - the leak leg itself is still tracked separately.
+case "$TRIPLE" in
+  *linux*) printf 'leak check: SUPPORTED here (SAN_DETECT_LEAKS=1 to enable), probe says: %s\n' \
+    "$(ASAN_OPTIONS=detect_leaks=1 "$OBJDIR/kvdb_tests" nosuchtest 2>&1 | head -1)"
+    [[ "${SAN_DETECT_LEAKS:-0}" == 1 ]] && export ASAN_OPTIONS=detect_leaks=1 ;;
+  *) printf 'leak check: %s\n' "$(ASAN_OPTIONS=detect_leaks=1 "$OBJDIR/kvdb_tests" nosuchtest 2>&1 | head -1)" ;;
+esac
 
 out=$("$OBJDIR/kvdb_tests" 2>&1); rc=$?
 printf '%s\n' "$out" > "$RUN/unit.log"
@@ -95,7 +136,7 @@ else
 fi
 
 # ---- official conformance test, same source the C++ project ships ----------
-"$CC" -std=c11 -O1 -g -Ileveldb/include -c leveldb/db/c_test.c \
+"$CC" -std=c11 $POSIX_DEFS -O1 -g -Ileveldb/include -c leveldb/db/c_test.c \
   -o "$RUN/c_test.o" &&
   "$CC" $SAN "$RUN/c_test.o" "$OBJDIR/libleveldb.a" -o "$RUN/c_test.exe"
 if [[ ! -f "$RUN/c_test.exe" ]]; then
@@ -115,7 +156,7 @@ else
 fi
 
 # ---- golden driver: writer and reader paths over real format bytes ---------
-"$CC" -std=c11 $CFLAGS_SAN -Wall -Wextra -Wno-unused-parameter \
+"$CC" -std=c11 $POSIX_DEFS $CFLAGS_SAN -Wall -Wextra -Wno-unused-parameter \
   -Ileveldb/include -c tests/interop/golden_driver.c -o "$RUN/golden_driver.o" &&
   "$CC" $SAN "$RUN/golden_driver.o" "$OBJDIR/libleveldb.a" -o "$RUN/golden_driver.exe"
 if [[ ! -f "$RUN/golden_driver.exe" ]]; then

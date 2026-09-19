@@ -4,6 +4,8 @@
 #
 # Run from Git Bash with:
 #   /d/ProgramFiles/msys64/usr/bin/bash.exe -lc 'bash /d/code/kvdb/scripts/run_golden.sh'
+# or on native Linux with:
+#   bash scripts/run_golden.sh
 #
 # For every deterministic workload mode it:
 #   1. creates a DB with the official engine and one with kvdb, from the SAME
@@ -36,6 +38,14 @@ printf 'Artifacts: %s\n' "$RUN"
 mkdir -p "$RUN/bin" "$RUN/db" "$RUN/logs"
 
 [[ -f "$KVDB_LIB" ]] || { printf 'Missing %s; run make first\n' "$KVDB_LIB"; exit 2; }
+# A stale archive silently tests last week's engine instead of the working
+# tree - the first Linux golden run looked green while linked against a
+# two-week-old build/libleveldb.a that segfaulted on modes the current
+# sources handle fine.
+if [[ -n "$(find "$REPO/src" "$REPO/include" -name '*.[ch]' -newer "$KVDB_LIB" -print -quit 2>/dev/null)" ]]; then
+  printf '%s is older than the sources in src/; run make first\n' "$KVDB_LIB" >&2
+  exit 2
+fi
 OFFICIAL_LIB=$(bash "$REPO/scripts/build_official.sh" | tail -1) || {
   printf 'official reference build failed\n'; exit 2; }
 printf 'kvdb library:     %s (%s)\n' "$KVDB_LIB" "$(sha256sum "$KVDB_LIB" | cut -c1-16)"

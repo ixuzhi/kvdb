@@ -21,6 +21,7 @@ kvdb/
 │   │                        #   bytewise 比较器/bloom 策略/logging
 │   ├── env.c                # Env 通用封装
 │   ├── env_win.c            # Windows Env 实现（文件/锁/后台调度/日志）
+│   ├── env_posix.c          # POSIX Env 实现（pthread + fcntl 锁）
 │   ├── env_mem.c            # 内存 Env（对应 helpers/memenv）
 │   ├── cache.c              # 分片 LRU Cache（对应 util/cache.cc）
 │   ├── dbformat.c           # 内部键/文件名/CURRENT（db/ + db/filename.cc）
@@ -104,43 +105,63 @@ LevelDB C API 的代码换一个头文件路径即可链接本实现。
 ## 构建与测试
 
 ```bash
-make            # 生成 build/libleveldb.a 与 build/kvdb_tests.exe
+make            # 生成 build/libleveldb.a 与 build/kvdb_tests(.exe)
 make test       # 运行全部测试
-./build/kvdb_tests.exe <关键字>   # 只运行名称匹配的测试
+./build/kvdb_tests.exe <关键字>   # 只运行名称匹配的测试（Windows）
+./build/kvdb_tests  <关键字>      # 同一件事（Linux/macOS，无 .exe 后缀）
 ```
+
+产物后缀由平台决定，不是构建选项：Windows 上 `gcc` 总给可执行文件加
+`.exe`，POSIX 上没有这个后缀，所以上面两行是同一目标的两种写法。
 
 环境说明：本仓库在 Windows（Git Bash）下开发，工具链为
 [w64devkit](https://github.com/skeeto/w64devkit)（GCC 16，位于
-`_tools/w64devkit/`，首次构建时自动下载）。构建系统按编译器目标
+`_tools/w64devkit/`，首次构建时自动下载），并在原生 Linux（Debian 12
+glibc）上完整跑过一遍同样的验证腿。构建系统按编译器目标
 （`gcc -dumpmachine`）自动选择 Env 后端：Windows 三元组（含 `mingw`
 或 `windows`）用 `env_win.c`，其余环境（Linux / macOS / MSYS2）用
-`env_posix.c` + pthread。三条已实测的工具链：
+`env_posix.c` + pthread。四条已实测的工具链：
 
 | 工具链 | 目标三元组 | 后端 | 结果 |
 |---|---|---|---|
 | MSYS2 gcc 15（`MSYSTEM=MSYS`） | `x86_64-pc-cygwin` | `env_posix.c` | 127/127 |
 | MinGW64 gcc 16（`MSYSTEM=MINGW64`，含 w64devkit） | `x86_64-w64-mingw32` | `env_win.c`（静态） | 127/127 + 官方 `c_test` 通过 |
 | MSYS2 clang 22（`MSYSTEM=CLANG64`） | `x86_64-w64-windows-gnu` | `env_win.c`（动态） | 127/127，ASan+UBSan 零报告 |
+| 原生 Linux gcc 12.2（Debian glibc） | `x86_64-linux-gnu` | `env_posix.c` | 127/127 + 黄金比对 + 官方 `c_test` + ASan/UBSan 零报告 |
 
-原生 Linux（glibc）/macOS 有待一次实机确认。sanitizer 这轮验证只对 clang64
-可用：MSYS2 没有 `mingw-w64-x86_64-sanitizers` 这个包，gcc 侧拿不到
-libasan/ubsan 运行时；clang64 自带 `libclang_rt.asan_dynamic-x86_64.dll`。
+macOS 有待一次实机确认。sanitizer 这轮的编译器按主机挑：Windows 上只能
+用 clang64（MSYS2 没有 `mingw-w64-x86_64-sanitizers` 这个包，gcc 侧拿不到
+libasan/ubsan 运行时；clang64 自带
+`libclang_rt.asan_dynamic-x86_64.dll`）；Linux 上没有这个限制，脚本默认改用
+gcc 的同一套 `-fsanitize=address,undefined`。原生 Linux 这一遍还逼出了
+Windows 三条工具链都看不见的缺陷 P0-10（`memcpy` 传 NULL，glibc 声明
+`nonnull` 而 msvcrt 没有），详见 `doc/08-Linux原生环境验证.md`。
+
+原生 Linux 这一轮为拿到全部四条腿新装的包（g++、libsnappy-dev、lcov 等
+7 个）与对应的卸载命令记录在 `doc/08-Linux原生环境验证.md` §3——
+lcov 那一件本轮装而未用，见同文 §9 T3。这 7 个包在本轮结束时已逐个点名
+卸净（`dpkg -l` 与安装前基线零差异），所以 L1/L2 这两条要现编官方 C++
+参考库的腿在复跑前需先重装 `g++`；L0/L3 只用 gcc，不受影响。同文 §3 末
+"卸完之后哪些腿还能跑"给出了实测结果。
 
 **切换工具链时必须换一个新的 `OBJDIR`（或先 `make clean`）**：
 `ar rcs` 只替换同名成员，不会删除上一个目标遗留的 `.o`，因此
 MSYS2（`env_posix.o`）与 MinGW64（`env_win.o`）混用同一 `build/`
 会产出同时含两个后端、且 `__errno`/`fsync` 未定义而链接失败的归档。
-三条工具链各自的验证方式：
+四条工具链各自的验证方式：
 
 ```bash
 MSYSTEM=MSYS   bash scripts/run_interop.sh   # POSIX 后端 + 跨引擎互操作
 MSYSTEM=MINGW64 make OBJDIR=build_mingw BINDIR=build_mingw && ./build_mingw/kvdb_tests
 MSYSTEM=CLANG64 bash scripts/run_sanitizers.sh  # ASan+UBSan：127 例 + 官方 c_test + golden 驱动
+bash scripts/run_sanitizers.sh                # 原生 Linux：同上，但用 gcc 的 sanitizer 运行时
 ```
 
-三行都假定已经在对应的 MSYS2 shell 里——`MSYSTEM=` 只是标注，普通 Git Bash
+前三行都假定已经在对应的 MSYS2 shell 里——`MSYSTEM=` 只是标注，普通 Git Bash
 里这样前缀不会把 `/clang64/bin` 之类加进 PATH（脚本会在这种情况下直接报
 "clang is not on PATH" 并给出可用的调用形式，而不是先删掉对象树）。
+同一条规则跨平台也成立：对象树里留着上一个平台的后端 `.o` 时，换一个
+`OBJDIR` 或先 `make clean`，不要指望 `ar` 清理它。
 
 ## 与真实 LevelDB 的二进制兼容性验证
 
@@ -157,23 +178,39 @@ RUN_C_TEST=1 bash scripts/run_interop.sh  # 双向读写互操作 + 官方 c_tes
 MSYSTEM=CLANG64 bash scripts/run_sanitizers.sh  # 以上证据再过一遍 ASan/UBSan
 ```
 
+四条脚本在 MSYS2 与原生 Linux 上是同一份：编译器三元组落在
+`*-cygwin`/`*linux*` 时走 POSIX 后端，Windows 专用段落（`cygpath`、
+`GetTempPathA` 兜底）只在 Windows 三元组下执行。它们都默认拿
+`build/libleveldb.a`，并且会先比对归档与 `src/`、`include/` 的 mtime——
+比源码旧就直接退出，避免"用一次性构建的旧归档验证当前代码"这种假绿。
+
 - `scripts/run_golden.sh`（`tests/interop/golden_driver.c`）：固定选项、
   无随机无时钟的确定性负载（SSTable/布隆/restart=1/大块/WAL/超 32KiB
   分片记录/空与二进制键值/删除标记/多层压缩）。每两种引擎各写一遍，
   除 `LOG*`/`LOCK` 外的所有文件必须**逐字节相同**；随后两个引擎交叉读
   对方的目录（点查 + 正/反向全扫描），四个摘要必须一致。严格模式下
   9/9 种负载、33 个文件全部相同；`levels` 模式会触发后台压缩，文件
-  编号与分层布局允许不同，只要求读取结果一致。
+  编号与分层布局允许不同，只要求读取结果一致。原生 Linux（glibc）重跑
+  给出与 Windows 完全相同的计数——109 项 PASS、33 个文件 SAME、1 项
+  DIFF（仅 `levels`）、0 FAIL。这条腿始终把参考库的 `HAVE_SNAPPY` 写死
+  为 0（压缩块的字节等价尚未闭环，见 doc/06 P2-8），装不装系统
+  libsnappy 都不改变这一轮的比对范围。
 - `scripts/run_interop.sh`：把一方引擎生成的目录交给另一方继续
   写入/更新（多阶段），并校验物理存储前提；`RUN_C_TEST=1` 额外用
   **未经修改的官方 `leveldb/db/c_test.c`** 直接链接 kvdb 运行。
-- `scripts/run_sanitizers.sh`：同一批证据在 clang64 +
-  `-fsanitize=address,undefined -fno-sanitize-recover=all` 下重跑一遍
+  它还会独立探测工具链能不能链接 snappy——Windows 上探不到（打印
+  SKIP），Linux 装了 `libsnappy-dev` 后打印 available；两种情况下
+  压缩模式都不跑，脚本只记录事实，不声称覆盖了压缩路径。
+- `scripts/run_sanitizers.sh`：同一批证据在 `-fsanitize=address,undefined
+  -fno-omit-frame-pointer -fno-sanitize-recover=all` 下重跑一遍
   （127 例 + 官方 `c_test` + `golden_driver` 的 create/verify，可选
-  `OFFICIAL_DBS=` 指向官方引擎写出的目录做验证）。任何一条 sanitizer
-  报告都会让进程直接终止，所以"退出码为 0"就是"零报告"。这一轮暴露并修复
-  了跳表节点未对齐与 info-log 句柄泄漏两个缺陷，逐文件说明见
-  `doc/07-ASan与UBSan内存安全验证.md`。
+  `OFFICIAL_DBS=` 指向官方引擎写出的目录做验证）。编译器按主机选：
+  Windows 用 clang64（MSYS2 无 gcc sanitizer 运行时），Linux 用 gcc。
+  任何一条 sanitizer 报告都会让进程直接终止，所以"退出码为 0"就是
+  "零报告"。Windows 那一轮暴露并修复了跳表节点未对齐与 info-log 句柄
+  泄漏两个缺陷，Linux 那一轮又逼出了 `memcpy(NULL, …, 0)`（P0-10），
+  逐文件说明见 `doc/07-ASan与UBSan内存安全验证.md` 与
+  `doc/08-Linux原生环境验证.md`。
 - `tests/test_format_extra.c`：把 varint/fixed/长度前缀、内部键 trailer、
   VersionEdit 标签、块句柄与 footer 的官方编码写成硬编码字节黄金值，
   不需要真实 leveldb 也能守住格式契约（并覆盖截断/损坏语料）。
@@ -203,8 +240,15 @@ MSYSTEM=CLANG64 bash scripts/run_sanitizers.sh  # 以上证据再过一遍 ASan/
 - 未实现 `leveldbutil`（dumpfile）与基准工具 `db_bench`。
 - 压缩调度与官方有差异（同等写入下停留在更少层级、更多文件），只影响
   空间/读放大，不影响任一引擎读取对方目录（doc/06 P2-7）。
-- snappy 压缩块的字节级等价未与官方比对（参考库在无 libsnappy 的环境
-  下会静默降级为不压缩），解码路径仅由本仓库的往返测试覆盖
-  （doc/06 P2-8）。
-- 泄漏维度未验证：Windows 版 ASan 不带 LeakSanitizer，需在
-  Linux/macOS 上跑同一脚本补齐（doc/06 P2-9）。
+- snappy 压缩块的字节级等价未与官方比对（doc/06 P2-8）。原生 Linux
+  装上新版参考库可开 `HAVE_SNAPPY=1` 做实验后，这一条精确化为：
+  **压缩器不位相同（kvdb 的简化编码器产物长约 3.4%），但块级互操作
+  成立**——两个引擎都能解对方的压缩块。因为这条模式没进正式比对集，
+  问题仍开着。
+- 泄漏维度未验证：Windows 版 ASan 不带 LeakSanitizer，Linux 上带
+  （`libasan.so.8`，负向探针实测能报），脚本已加 `SAN_DETECT_LEAKS=1`
+  开关随时可跑；这一轮按"先记录、暂不执行"处理
+  （doc/06 P2-9，doc/08 §9 T1）。
+- 并发维度只有 2 写 2 读 120 轮屏障用例，未跑 ThreadSanitizer、也没做
+  多进程锁竞争专项（Linux 上 `libtsan` 就位、`fcntl` 区域锁语义可直接
+  测真值，同样记为 TODO：doc/08 §9 T2/T4）。

@@ -41,15 +41,36 @@ mkdir -p "$RUN/bin" "$RUN/db" "$RUN/logs"
 # A stale archive silently tests last week's engine instead of the working
 # tree - the first Linux golden run looked green while linked against a
 # two-week-old build/libleveldb.a that segfaulted on modes the current
-# sources handle fine.
-if [[ -n "$(find "$REPO/src" "$REPO/include" -name '*.[ch]' -newer "$KVDB_LIB" -print -quit 2>/dev/null)" ]]; then
+# sources handle fine. `| head -1` rather than find's -quit: BSD/macOS find
+# has no -quit, and an unsupported primary would turn this guard into a
+# silent no-op on exactly the platform where it still has to be proven out.
+if [[ -n "$(find "$REPO/src" "$REPO/include" -name '*.[ch]' -newer "$KVDB_LIB" -print 2>/dev/null | head -1)" ]]; then
   printf '%s is older than the sources in src/; run make first\n' "$KVDB_LIB" >&2
+  exit 2
+fi
+# Every byte verdict below is a digest comparison (MSYS2 has sha256sum but
+# neither cmp nor diff), so an absent digest tool would leave both sides empty
+# and make "" == "" report SAME - a green run that compared nothing. Pick one
+# now and prove it emits 64 hex chars: BSD/macOS has no sha256sum but does ship
+# shasum, and failing here loudly is the difference between "unsupported host"
+# and "format compatibility confirmed". A function rather than a command array:
+# bash 3.2 (the macOS default) treats an empty array as an unbound variable.
+if command -v sha256sum >/dev/null 2>&1; then
+  digest() { sha256sum "$@"; }
+elif command -v shasum >/dev/null 2>&1; then
+  digest() { shasum -a 256 "$@"; }
+else
+  printf '%s needs sha256sum (or shasum -a 256) to compare bytes\n' "$0" >&2
+  exit 2
+fi
+if ! [[ $(digest <<< probe | cut -c1-64) =~ ^[0-9a-f]{64}$ ]]; then
+  printf '%s: the digest command produced no 64-hex digest; refusing to compare\n' "$0" >&2
   exit 2
 fi
 OFFICIAL_LIB=$(bash "$REPO/scripts/build_official.sh" | tail -1) || {
   printf 'official reference build failed\n'; exit 2; }
-printf 'kvdb library:     %s (%s)\n' "$KVDB_LIB" "$(sha256sum "$KVDB_LIB" | cut -c1-16)"
-printf 'official library: %s (%s)\n' "$OFFICIAL_LIB" "$(sha256sum "$OFFICIAL_LIB" | cut -c1-16)"
+printf 'kvdb library:     %s (%s)\n' "$KVDB_LIB" "$(digest "$KVDB_LIB" | cut -c1-16)"
+printf 'official library: %s (%s)\n' "$OFFICIAL_LIB" "$(digest "$OFFICIAL_LIB" | cut -c1-16)"
 
 "$CC" -std=c11 -D_GNU_SOURCE -O2 -g -Wall -Wextra -Werror \
   -I"$REPO/leveldb/include" -c "$REPO/tests/interop/golden_driver.c" \
@@ -65,7 +86,9 @@ note() { printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" >> "$RUN/results.tsv"; }
 
 # compare <label> <dirA> <dirB>: identical file set and identical bytes.
 # MSYS2 here ships sha256sum/od/xxd but neither cmp nor diff, so equality goes
-# through sha256sum and the first-difference search through a small python pass.
+# through the digest resolved above and the first-difference search through a
+# small python pass. Sizes use `wc -c` rather than `stat -c %s` because the
+# latter is GNU-only (BSD spells it `stat -f %z`) and only ever feeds a message.
 compare_bytes() {
   local label=$1 a=$2 b=$3 status=ok
   local list_a list_b
@@ -87,12 +110,12 @@ compare_bytes() {
       printf '  %s: missing on one side\n' "$f"
       continue
     fi
-    ha=$(sha256sum < "$fa"); hb=$(sha256sum < "$fb")
+    ha=$(digest < "$fa"); hb=$(digest < "$fb")
     if [[ "$ha" != "$hb" ]]; then
       status=DIFF
-      note "$label" 'bytes' 'DIFF' "$f ($(stat -c %s "$fa") vs $(stat -c %s "$fb") bytes)"
+      note "$label" 'bytes' 'DIFF' "$f ($(wc -c < "$fa") vs $(wc -c < "$fb") bytes)"
       printf '  %s differs: official=%s bytes, kvdb=%s bytes\n' "$f" \
-        "$(stat -c %s "$fa")" "$(stat -c %s "$fb")"
+        "$(wc -c < "$fa")" "$(wc -c < "$fb")"
       /usr/bin/python3 - "$fa" "$fb" <<'PY' 2>/dev/null | sed 's/^/    /'
 import sys
 a = open(sys.argv[1], 'rb').read()
@@ -108,7 +131,7 @@ for name, data in (("official", a), ("kvdb", b)):
         chr(c) if 32 <= c < 127 else "." for c in window) + ">" if window else "  <empty>"))
 PY
     else
-      note "$label" 'bytes' 'SAME' "$f ($(stat -c %s "$fa") bytes)"
+      note "$label" 'bytes' 'SAME' "$f ($(wc -c < "$fa") bytes)"
     fi
   done <<< "$list_a"
   [[ "$status" == ok ]]

@@ -106,15 +106,15 @@ Windows 上 `DestroyDB` 之后同路径重开报 win32 error 32（共享冲突�
 | `tests/test_api_extra.c:343` | `api_extra.DestroyDbThenReopenInSameProcess`：同一进程内 3 轮 close→DestroyDB→重开→确认已清空→再写→压缩 |
 | `scripts/run_sanitizers.sh` | 本文 §2 的那条命令，可复现、带留档 |
 
-### 3.6 原生 Linux 复跑逼出的 P0-10（`get_range2` 向 `memcpy` 交 NULL）
+### 3.6 原生 Linux 复跑这一轮的配套改动（含随后 Windows 回归修掉的两处）
 
-| 文件 | 改动 | 为什么 Windows 侧看不出来 |
+| 文件 | 改动 | 为什么到这一轮才浮出来 |
 |---|---|---|
-| `src/version_set.c:1442` | `get_range2` 的两次 `memcpy` 各加 `n1 > 0`/`n2 > 0` 守卫。`SetupOtherInputs` 在该层无其它文件时传 `NULL + 0`，而向 `memcpy` 交 NULL 即使长度为 0 也是 UB | glibc 把 `memcpy` 形参声明为 `nonnull`，UBSan 的 `nonull-argument` 检查据此判罚；Windows 侧 libc++/msvcrt 没有该属性声明，同一份代码静默通过。官方 C++ 版是 `std::vector` 合并，从不交出空基址——这条 UB 属 C 重写引入 |
+| `src/version_set.c:1442` | **P0-10**：`get_range2` 的两次 `memcpy` 各加 `n1 > 0`/`n2 > 0` 守卫。`SetupOtherInputs` 在该层无其它文件时传 `NULL + 0`，而向 `memcpy` 交 NULL 即使长度为 0 也是 UB | glibc 把 `memcpy` 形参声明为 `nonnull`，UBSan 的 `nonull-argument` 检查据此判罚；Windows 侧 libc++/msvcrt 没有该属性声明，同一份代码静默通过。官方 C++ 版是 `std::vector` 合并，从不交出空基址——这条 UB 属 C 重写引入 |
 | `Makefile:6` | 新增 `SANFLAGS` 通道：命令行 `make CFLAGS=…` 会**同时吞掉** Makefile 里的 `+=` 追加（POSIX 分支的 `-D_GNU_SOURCE`、`-lpthread` 会静默消失，`make -n` 可实证），改为在平台分支之后 `+= $(SANFLAGS)` | Windows 分支本来什么都不追加，所以这个覆盖语义在 MSYS2 上从未暴露 |
-| `scripts/run_sanitizers.sh` | `CC` 按宿主自动选（Windows 目标→clang，其余→gcc）；`-D_GNU_SOURCE` 只加给 `*linux*` 下脚本自己编的 `c_test.o`/`golden_driver.o`；`TMP`/`cygpath` 兜底块收窄到 Windows/cygwin/mingw 目标（POSIX 上原来会退化成 `TMP=.`，把留档写进仓库）；leak 行按平台分别陈述并支持 `SAN_DETECT_LEAKS=1` | — |
+| `scripts/run_sanitizers.sh` | `CC` 按宿主自动选（Windows 回归时改为**只有 `*linux*` 才默认 gcc**，其余一律 clang；Windows 三元组配非 clang 的 `CC` 直接 `exit 2`，且这道守卫排在 `rm -rf "$OBJDIR"` 之前，误跑不会毁掉上一次归档）；`-D_GNU_SOURCE` 只加给 `*linux*` 下脚本自己编的 `c_test.o`/`golden_driver.o`；`TMP`/`cygpath` 兜底块收窄到 Windows/cygwin/mingw 目标（POSIX 上原来会退化成 `TMP=.`，把留档写进仓库）；leak 行按平台分别陈述并支持 `SAN_DETECT_LEAKS=1` | 原判据用 `/usr/bin/gcc -dumpmachine` 求值：Git Bash 里该路径没有 gcc（拿到空串→选 gcc），MINGW64 里它又是 cygwin 目标（三元组不含 `mingw`），两条都会挑中一个没有 sanitizer runtime 的编译器。详见 doc/08 §8.3 |
 | `scripts/build_official.sh`、`scripts/run_interop.sh` | 编译器断言从"必须 `x86_64-pc-cygwin`"放宽为 `*-cygwin` 或 `*linux*`；`KVDB` 路径可 `KVDB_LIB=` 覆盖 | 旧断言让 Linux 上连参考库都拒绝构建 |
-| `scripts/run_golden.sh`、`scripts/run_interop.sh` | 新增归档时效守卫：`src/`、`include/` 里有比归档更新的 `.c/.h` 即 `exit 2` | 首轮 L1 拿 09‑13 的旧 `build/libleveldb.a` 跑，报出 4 个"伪 Linux 缺陷"（`sst-bloom`/`sst-bigblock` SIGSEGV、`edge` 断言、`tomb` 点查 NotFound）；换当前库立即全绿。守卫的负向对照已做：把归档 `touch` 到过去时间后两条腿都拒绝运行 |
+| `scripts/run_golden.sh`、`scripts/run_interop.sh` | 新增归档时效守卫：`src/`、`include/` 里有比归档更新的 `.c/.h` 即 `exit 2`。写法是 `find … -print \| head -1`，不用 GNU 独有的 `-quit`（BSD/macOS 上会报错退出，配合 `2>/dev/null` 与空串判断正好让守卫静默失效） | 首轮 L1 拿 09‑13 的旧 `build/libleveldb.a` 跑，报出 4 个"伪 Linux 缺陷"（`sst-bloom`/`sst-bigblock` SIGSEGV、`edge` 断言、`tomb` 点查 NotFound）；换当前库立即全绿。守卫的负向对照两侧都做过：Linux 与 Windows 上各把归档 `touch` 到过去时间、用 `KVDB_LIB=` 指过去，两条脚本都拒绝运行（rc=2） |
 
 ## 4. 负向对照：怎么确认新用例真能抓到缺陷
 

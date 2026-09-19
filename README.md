@@ -135,7 +135,9 @@ libasan/ubsan 运行时；clang64 自带
 `libclang_rt.asan_dynamic-x86_64.dll`）；Linux 上没有这个限制，脚本默认改用
 gcc 的同一套 `-fsanitize=address,undefined`。原生 Linux 这一遍还逼出了
 Windows 三条工具链都看不见的缺陷 P0-10（`memcpy` 传 NULL，glibc 声明
-`nonnull` 而 msvcrt 没有），详见 `doc/08-Linux原生环境验证.md`。
+`nonnull` 而 msvcrt 没有），详见 `doc/08-Linux原生环境验证.md`。上表 Windows
+三行在 P0-10 修复合入后**又实跑过一遍**：单测、官方 `c_test`、ASan/UBSan、
+黄金比对全部复现原结果，`results.tsv` 与修复前那轮逐行相同（doc/08 §8）。
 
 原生 Linux 这一轮为拿到全部四条腿新装的包（g++、libsnappy-dev、lcov 等
 7 个）与对应的卸载命令记录在 `doc/08-Linux原生环境验证.md` §3——
@@ -180,9 +182,14 @@ MSYSTEM=CLANG64 bash scripts/run_sanitizers.sh  # 以上证据再过一遍 ASan/
 
 四条脚本在 MSYS2 与原生 Linux 上是同一份：编译器三元组落在
 `*-cygwin`/`*linux*` 时走 POSIX 后端，Windows 专用段落（`cygpath`、
-`GetTempPathA` 兜底）只在 Windows 三元组下执行。它们都默认拿
-`build/libleveldb.a`，并且会先比对归档与 `src/`、`include/` 的 mtime——
-比源码旧就直接退出，避免"用一次性构建的旧归档验证当前代码"这种假绿。
+`GetTempPathA` 兜底）只在 Windows 三元组下执行。吃现成归档的两条
+（`run_golden.sh`、`run_interop.sh`，默认 `build/libleveldb.a`，可用
+`KVDB_LIB=` 指到别处）会先比对归档与 `src/`、`include/` 的 mtime——比源码
+旧就直接退出，避免"用一次性构建的旧归档验证当前代码"这种假绿；
+`run_golden.sh` 另外在动工前就选定并校验摘要命令（`sha256sum`，BSD/macOS 上
+退回 `shasum -a 256`）——逐字节判据本身就是一次摘要比较，工具缺失时两边都是
+空串，`"" == ""` 会把一次什么都没比的运行报成绿色；
+`run_sanitizers.sh` 自己重建 `build/san/`，不存在吃陈旧归档的可能。
 
 - `scripts/run_golden.sh`（`tests/interop/golden_driver.c`）：固定选项、
   无随机无时钟的确定性负载（SSTable/布隆/restart=1/大块/WAL/超 32KiB

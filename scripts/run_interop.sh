@@ -39,8 +39,10 @@ printf 'Official commit: %s\n' "$commit"
 KVDB=${KVDB_LIB:-$REPO/build/libleveldb.a}
 [[ -f "$KVDB" ]] || { printf 'Missing prebuilt %s; build it separately first\n' "$KVDB"; exit 2; }
 # Same staleness trap as scripts/run_golden.sh: never interop-test an archive
-# that predates the sources it claims to contain.
-if [[ -n "$(find "$REPO/src" "$REPO/include" -name '*.[ch]' -newer "$KVDB" -print -quit 2>/dev/null)" ]]; then
+# that predates the sources it claims to contain. `| head -1` instead of
+# find's -quit, which BSD/macOS find does not have - there the guard would
+# otherwise fail open as a silent no-op.
+if [[ -n "$(find "$REPO/src" "$REPO/include" -name '*.[ch]' -newer "$KVDB" -print 2>/dev/null | head -1)" ]]; then
   printf '%s is older than the sources in src/; run make first\n' "$KVDB" >&2
   exit 2
 fi

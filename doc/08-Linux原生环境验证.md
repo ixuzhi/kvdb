@@ -24,6 +24,7 @@ MinGW64 `env_win` 静态、clang64 `env_win` 动态），`doc/06` 的 P2-1 因�
 
 一句话：**格式兼容、互操作、内存安全三条主张在原生 glibc 上全部复现成立**，
 且这轮新增的编译器（gcc 12 + glibc 头文件）确实比 clang64 多看见一处真实 UB。
+本机（Windows + MSYS2 三条通路）的回归随后也全部实跑通过，见 §8。
 
 ---
 
@@ -38,16 +39,20 @@ MinGW64 `env_win` 静态、clang64 `env_win` 动态），`doc/06` 的 P2-1 因�
 | Env 后端 | `src/env_posix.c` + pthread；实证：`env_win.o` 的 `.text` 为 **0 字节**（空 TU），`env_posix.o` 有 4717 字节代码 |
 | 官方参考库 | `leveldb` 子模块固定提交 `7ee830d02b623e8ffe0b95d59a74db1e58da04c5`（`1.23-91-g7ee830d`） |
 
-参考库的 port 配置探针结果与 MSYS2 腿不同，值得记一笔：
+参考库的 port 配置探针在两条腿上的实测值（右侧一列来自本机 MSYS2 腿，
+`build/interop/official/include/port/port_config.h` 与 `run_interop.sh` 打出的
+`Config:` 行都可核对）：
 
-| 宏 | Linux(glibc) | 含义 |
-|---|---|---|
-| `HAVE_FDATASYNC` | **1** | 走 `fdatasync`（Cygwin 侧为 0，只能 `fsync`） |
-| `HAVE_O_CLOEXEC` | 1 | 与 Cygwin 同 |
-| `HAVE_FULLFSYNC` | 0 | 与 Cygwin 同（macOS 才为 1） |
-| `HAVE_CRC32C` / `HAVE_SNAPPY` / `HAVE_ZSTD` | 0 | 刻意关，保持两引擎同处"纯软件 CRC + 不压缩"基线 |
+| 宏 | Linux(glibc) | MSYS2(cygwin) | 含义 |
+|---|---|---|---|
+| `HAVE_FDATASYNC` | **1** | **1** | 两侧都走 `fdatasync`——Cygwin 也提供它，这条**不是**差异 |
+| `HAVE_O_CLOEXEC` | 1 | 1 | 同 |
+| `HAVE_FULLFSYNC` | 0 | 0 | 同（macOS 才为 1） |
+| `HAVE_CRC32C` / `HAVE_SNAPPY` / `HAVE_ZSTD` | 0 | 0 | 刻意关，保持两引擎同处"纯软件 CRC + 不压缩"基线 |
 
-`fdatasync`/`fsync` 只影响落盘时机，不写进任何磁盘字节——L1 仍逐字节相同即为证。
+上表没有一项在两腿之间取值不同，所以参考库这一侧不存在"环境差异需要解释"。
+即便 `fdatasync`/`fsync` 真的不同，影响的也只是落盘时机、不写进任何磁盘字节
+——L1 仍逐字节相同即为证。
 
 ---
 
@@ -128,7 +133,7 @@ make -j4                                   # → build/libleveldb.a, build/kvdb_
 TMPDIR=/root/work/kvdb/build_linux/tmp ./build/kvdb_tests   # 127 tests, 0 failed
 ```
 
-gcc 12 在 `-Wall -Wextra` 下的 6 条告警（ clang64/MSYS2 轮次未记录，属本轮新证据；
+gcc 12 在 `-Wall -Wextra` 下的 6 条告警（Linux 这轮的构建日志首次逐条记下；
 均为既有代码质量问题，不是 Linux 行为差异，未在本轮修改）：
 
 | 位置 | 告警 |
@@ -139,6 +144,19 @@ gcc 12 在 `-Wall -Wextra` 下的 6 条告警（ clang64/MSYS2 轮次未记录�
 | `src/c_api.c:62` | `‘unwrap_comparator’ defined but not used` |
 | `tests/test_cache.c:13` | `‘cache_key’ defined but not used` |
 | `tests/test_db.c:125` | `‘dbt_contains’ defined but not used` |
+
+这 6 处**不是 Linux 独有**：Windows 侧随后复跑，MSYS gcc 15.2 报出完全相同的
+6 个位置，MINGW64 gcc 16.1 与 clang64 clang 22.1 在这 6 条之外多两条 `set but not used`
+（`src/db.c:447` 的 `compactions`、`src/version_set.c:1190` 的 `read_records`）。
+八条逐条对过官方源，**没有一条指向行为差异**，所以 T7 是纯清理，且有一条要留神：
+
+| 告警 | 官方对应 | 清理方式 |
+|---|---|---|
+| `version_set.c:1562 inputs0_size` | `db/version_set.cc:1406` 同名变量只喂给 1422 行的 `fprintf` 调试行 | 删；分支条件实际用的是 `inputs1_size + expanded0_size`，两边一致 |
+| `db.c:447 compactions` | 官方 `db_impl.cc:472` **读它**：`reuse_logs && last_log && compactions == 0` | 别顺手删——它在 kvdb 无人读只因为 `reuse_logs` 未实现（doc/06 P1-1，`src/db.c:499` 已注明恒按 false），实现 P1-1 时正好要用 |
+| `version_set.c:1190 read_records` | 官方 `version_set.cc:988` 只把它打进调试行 | 删 |
+| `table.c:420` const 丢弃 | 官方把 filter 块**复制**进 `new char[]` | 改 `t->filter_data = block.alloc;`——`block.data.data` 本就是同一个 `buf` 的 const 视图，换过去既消警告又与下一行 `block.alloc = NULL` 的"转移所有权"意图对齐 |
+| `env_mem.c:66`、`c_api.c:62`、`test_cache.c:13`、`test_db.c:125` | 官方无对应物，是移植/测试辅助留下的死 static | 删（或标 `__attribute__((unused))`，但那是掩盖） |
 
 另：跑完留下 6 个 `$TMPDIR/leveldbtest-<pid>` 目录。这是**每进程一个**的 scratch 命名
 （`posix_get_test_directory` 用 `TMPDIR`+pid，`env_win.c` 同构），不是逐用例泄漏；
@@ -269,19 +287,81 @@ doc/06 P2-1 想要原生 Linux 的核心理由。
 
 ---
 
-## 8. 与 Windows 腿的差异，以及必须在 Windows 侧回归的点
+## 8. 与 Windows 通路的差异，以及 Windows 侧回归结果
 
-本轮只动了 `Makefile` 与四个脚本，Linux 通路全部实测；**Windows 通路只做了静态推理，
-未实机复跑**（这台机器上没有 MSYS2）。合入前建议按 README 的三条命令各回归一次，
-风险点集中在：
+> 本节先前写的是"Windows 通路只做了静态推理，未实机复跑（那台机器上没有 MSYS2）"。
+> 回归已在本机跑完：Windows 10 19044 + MSYS2 三条工具链，下表五个风险点逐条换成实测
+> 结论。跑的过程中另外暴露出三处脚本缺陷，已在 §8.3 修掉；两个新的 harness 坑记在 §8.4。
 
-| 改动 | 对 Windows 腿的影响 | 需回归 |
+### 8.1 Windows 侧环境
+
+| 工具链 | 编译器 | 三元组 | Env 后端 | 本轮用到的命令 |
+|---|---|---|---|---|
+| MSYS2 MSYS | gcc 15.2.0 | `x86_64-pc-cygwin` | `env_posix` + pthread | `make OBJDIR=build_l0w BINDIR=build_l0w`、`run_golden.sh`、`RUN_C_TEST=1 run_interop.sh` |
+| MSYS2 MINGW64 | gcc 16.1.0 | `x86_64-w64-mingw32` | `env_win`（`-static`） | `make OBJDIR=build_mingw BINDIR=build_mingw` |
+| MSYS2 CLANG64 | clang 22.1.8 | `x86_64-w64-windows-gnu` | `env_win` + ASan/UBSan | `MSYSTEM=CLANG64 bash scripts/run_sanitizers.sh` |
+
+三条通路都是 Git Bash 起 MSYS2 shell、手工导出 `PATH` 的取法（`MSYSTEM=MSYS` 单独
+前缀不会让 `clang` 出现在普通 Git Bash 里，脚本里那条提示就是为此写的）。
+
+### 8.2 五个风险点的实测结论
+
+| 改动 | 对 Windows 通路的影响 | 实测 |
 |---|---|---|
-| `Makefile` `SANFLAGS` 通道 | clang64 路径（三元组含 `windows`）不再有"命令行覆盖 CFLAGS"这回事，改为基线标志 + 追加：会看到重复的 `-std=c11`/`-O1`/`-Wall`（后者生效），且 `LDFLAGS` 多出编译期标志。`-static` 仍只给 mingw 分支，clang 的 ASan DLL 解析不受影响 | `MSYSTEM=CLANG64 bash scripts/run_sanitizers.sh` |
-| `build_official.sh`/`run_interop.sh` 断言放宽 | `x86_64-pc-cygwin` 仍被接受（`*-cygwin`） | `MSYSTEM=MSYS bash scripts/run_interop.sh` |
-| 归档时效守卫 | MSYS2 下 `find -newer` 与 mtime 精度、`core.autocrlf` checkout 时间可能误报"比源码旧"。若误报，正确动作是 `make` 而不是放宽守卫 | 首次跑观察是否触发 |
-| `run_sanitizers.sh` 的 `TMP` 守卫 | 条件从"TMP 未设"变为"Windows 目标 **且** TMP 未设"，MSYS2 行为不变；三元组改成一次求值存进 `TRIPLE`/`ON_WINDOWS`，判定与原来等价。"编译器不在 PATH"的提示按 `CC` 分支给，clang 那条文案与改前一致 | 同上 |
-| `src/version_set.c` P0-10 修复 | 纯 C 逻辑，平台中性；MSYS2 上重跑 L1/L3 应仍全绿 | 复跑两条腿 |
+| `Makefile` `SANFLAGS` 通道 | clang64 路径不再有"命令行覆盖 CFLAGS"这回事，改为基线标志 + 追加：`build.log` 里确实出现重复的 `-std=c11`/`-O1`/`-Wall`（后者生效），`LDFLAGS` 也带上编译期标志。`-static` 仍只给 mingw 分支 | **rc=0**：`MSYSTEM=CLANG64 bash scripts/run_sanitizers.sh` → 127 例 0 失败、官方 c_test `PASS (16 phases)`、`golden_driver` 10 负载 create/verify 全绿、零 ASan/UBSan 报告。留档 `build/san-runs/interop-20260919-183717/`，其后的 `-184815/`、`-185101/` 两次复跑同结果。ASan 的 DLL 解析正常（能跑起来并打印报告即为证） |
+| `build_official.sh`/`run_interop.sh` 断言放宽 | `x86_64-pc-cygwin` 仍被接受 | **rc=0**：`RUN_C_TEST=1 bash scripts/run_interop.sh`（MSYS）65 个阶段全部 `rc=0`，与 Linux 侧同数；参考库照建（`Config: FDATASYNC=1 FULLFSYNC=0 O_CLOEXEC=1 CRC32C=0 SNAPPY=0 ZSTD=0; Bloom disabled`），未改动的 `c_test.c` 直连 kvdb `PASS`。留档 `build/interop/run-BP15JkRf/` |
+| 归档时效守卫 | MSYS2 的 `find -newer` 与 mtime 精度、`core.autocrlf` checkout 时间可能误报"比源码旧" | 四条通路连跑**没有一次误报**。反向对照做实了：复制 `build/libleveldb.a` 并 `touch` 到 12:00，用 `KVDB_LIB=` 指过去，`run_golden.sh` 与 `run_interop.sh` 都打印 `... is older than the sources in src/; run make first` 并 `rc=2`。守卫会拦，不是摆设 |
+| `run_sanitizers.sh` 的 `TMP` 守卫 | 条件从"TMP 未设"变为"Windows 目标 **且** TMP 未设"；三元组一次求值存进 `TRIPLE`/`ON_WINDOWS` | 行为与改前等价，且**不需要**在脚本外预设 `TMP`：clang64 那轮打印的是 `TMP was unset; pointing the native backend at D:\ProgramFiles\msys64\tmp`，随后 127 例全过 |
+| `src/version_set.c` P0-10 修复 | 纯 C 逻辑，平台中性 | **字节中性在 Windows 侧同样成立**：P0-10 之前那轮 golden（`golden-20260919-161058`）与之后这轮（`golden-20260919-184220`，`rc=0`）的 `results.tsv` **逐行相同**——109 PASS / 33 SAME / 1 DIFF(`levels`) / 1 INFO，摘要与逐项判定无一变动。两跑之间唯一变化的磁盘产物是**官方引擎自己写的** `levels-official/MANIFEST-000002`（同为 346 字节，差在第 139 字节 `kLastSequence` 483→485，以及该记录的 CRC）；名字以 `-kvdb` 结尾的 30 棵目录（kvdb 是最后的写入方，`levels-kvdb` 也在其列）逐字节未变。这正是 `golden_driver.c` 开头声明的"`levels` 是故意留出的探索性模式（走自动后台 compaction），字节布局允许不同"，不是回归 |
+
+单测与告警也各跑了一遍：MSYS `build_l0w/kvdb_tests.exe` 与 MINGW64
+`build_mingw/kvdb_tests.exe` 都是 **127 tests, 0 failed**（`TMP` 由 Git Bash 侧
+`cygpath -w /tmp` 给定）；两份构建日志留在 `build/msys-l0-build.log`、
+`build/mingw64-l0-build.log`（`build/` 已被忽略，不入库）。告警位置见 §4 的新表——MSYS
+gcc 15.2 与 Linux gcc 12 报出**完全相同的 6 处**，MINGW64 gcc 16.1 与 clang64 各多两处
+`set but not used`。T7 因此在四条通路上是同一件事，与平台无关。
+
+### 8.3 本轮实测暴露的三处脚本缺陷（已修）
+
+1. **`run_sanitizers.sh` 的 `CC` 默认值选错方向**。原逻辑是"三元组含
+   `cygwin|mingw|windows` 才用 clang，否则 gcc"，求值用的是 `/usr/bin/gcc -dumpmachine`。
+   在 Git Bash 里 `/usr/bin` 没有 gcc，命令替换拿到空串 → 落到 `*)` 分支选了 gcc；
+   而 MINGW64 的 `/usr/bin/gcc` 是 **cygwin** gcc，三元组 `x86_64-pc-cygwin` 同样不含
+   `mingw`。也就是说默认路径会挑一个根本没有 sanitizer runtime 的编译器。现改为
+   **只有 `*linux*` 才默认 gcc**，其余一律 clang；并加一道早退守卫：Windows 系三元组
+   + 非 clang 的 `CC` 直接 `exit 2` 给出处方（放在 `rm -rf "$OBJDIR"` **之前**，
+   所以误跑不会毁掉上一次的归档——已验证 `build/san/libleveldb.a` 时间戳未动）。
+2. **`find -print -quit`**（`run_golden.sh`、`run_interop.sh` 的归档时效守卫）。GNU find
+   有 `-quit`，BSD/macOS find 没有；那里它会报错退出，配合 `2>/dev/null` 与 `-n ""`
+   判断，守卫在"仍需首次证明"的 macOS 上恰好**静默失效**。改成 `-print | head -1`，
+   两派都支持，代价只是多扫几个文件。
+3. **`run_golden.sh` 的字节比较在"没有 `sha256sum` 的宿主"上是 fail-open 的**——与上面
+   第 2 条同一类（错得很安静，而且正好错在唯一还没测的平台上）。MSYS2 这一带有
+   `sha256sum` 却没有 `cmp`/`diff`，所以逐字节判据其实写在摘要上：
+   `ha=$(sha256sum < A); hb=$(sha256sum < B); [[ $ha != $hb ]]`——
+   命令不存在时两边都取到空串，`"" == ""` → 每个文件都记 `SAME`、`RESULT rc=0`，
+   一次什么都没比的运行看起来像"格式完全兼容"。现在脚本开头就选定摘要命令
+   （`sha256sum`，没有则 BSD 的 `shasum -a 256`）并**要求它真吐出 64 位十六进制**，
+   否则 `exit 2`；顺带把只出现在提示文本里的 `stat -c %s`（GNU 写法）换成
+   POSIX 的 `wc -c <`。两个负向对照都做实了：把 `sha256sum` 换成吐乱码的替身 →
+   `the digest command produced no 64-hex digest; refusing to compare`、`rc=2`；
+   把两个 `command -v` 都指向不存在的工具 → `needs sha256sum (or shasum -a 256)`、`rc=2`。
+   改完复跑整条 L1：`rc=0`、109 PASS / 33 SAME / 1 DIFF / 1 INFO，`results.tsv` 与改前
+   **逐行相同**（`golden-20260919-191526/`）。用函数而非命令数组来选工具，是因为
+   macOS 自带的 bash 3.2 在 `set -u` 下把空数组当成未绑定变量。
+
+### 8.4 两个新的 harness 坑（补 §6）
+
+- **不要在脚本运行时编辑它**。bash 按字节偏移增量读取脚本，边跑边改会让它从错位的
+  中间处继续解析，报出根本不存在的语法错误。本轮 `run_interop.sh` 就在跑到一半时被编辑，
+  留下 `line 107: syntax error near unexpected token 'then'`、`rc=2`（`build/interop-rerun.log`）；
+  同一份工作副本 `bash -n` 干净、原样复跑 `rc=0`。**看日志判缺陷前，先确认那次跑没被自己的编辑打断。**
+- **外层重定向会被脚本自身的 `exec > >(tee …)` 抢走**。`bash scripts/x.sh > out.log`
+  可能只拿到前半段，尾部（含 `RESULT rc=`）进了 process substitution 那份，读成"失败"。
+  权威副本永远是 `$RUN/run.log`。
+
+小结：doc/06 P2-1 的"原生 Linux"这一半已闭合，Windows 三条通路在 P0-10 之后仍全绿。
+剩下 macOS（T6）与 §9 的 T1–T8。
 
 ---
 
@@ -303,8 +383,8 @@ apt-get install --no-install-recommends --no-download -y g++ libsnappy-dev lcov 
 | T3 | **行/分支覆盖率报告**（"覆盖完全"的量化口径） | `lcov` 装过又卸了（可离线装回，见本节开头）；`gcov` 随 gcc 还在，但**本轮从未做过 `--coverage` 构建**，全仓库 0 个 `.gcno/.gcda`，没有现成数据 | `make clean && make OBJDIR=build_cov BINDIR=build_cov SANFLAGS="--coverage"`（**必须走 `SANFLAGS`**：命令行给 `CFLAGS=` 会吞掉 `+=` 的 `-D_GNU_SOURCE`/`-lpthread`，正是 §6 坑①），再 `lcov --capture --directory build_cov --output-file cov.info` + `genhtml`，未命中行逐条回填 doc/05。**配方前半段已实测**（在 `/tmp` 里做的一次性构建，探针产物随后删掉）：`SANFLAGS="--coverage"` 的编译行里 `-D_GNU_SOURCE` 与 `--coverage` 并存、25 个 `.gcno`、跑完 127/0 并落下 36 个 `.gcda`；后半段（`--capture`/`genhtml`）因 `lcov` 已卸未跑，重装后再验。 |
 | T4 | **多进程锁语义专项**（P2-6） | Linux 的 `fcntl` 区域锁与 Windows 独占打开语义不同，只有原生 POSIX 能测真值 | 两进程同时 `leveldb_open` 同一目录，断言第二个拿到 `IO error`；与官方 `env_posix` 行为对照 |
 | T5 | snappy 压缩模式并入正式腿（P2-8，见 §7） | 探路已完成 | 决定官方库是否默认开 `HAVE_SNAPPY`，并加 `sst-snappy` 模式 |
-| T6 | macOS 实机确认（P2-1 的另一半） | 本机是 Linux，无 macOS | 同 L0/L1 两条腿；注意 `HAVE_FULLFSYNC=1` 会让 port 配置探针结果不同 |
-| T7 | gcc 12 的 6 条告警（§4 表） | 未改，属既有代码质量 | 逐条清（先 `table.c:420` 的 const 丢弃），改完三条腿各重跑 |
+| T6 | macOS 实机确认（P2-1 的另一半） | Linux 那轮的机器与这台 Windows 机都没有 macOS | 同 L0/L1 两条腿；注意 `HAVE_FULLFSYNC=1` 会让 port 配置探针结果不同。**动身前先按源码读到的四处 GNU 依赖做准备**：① 三元组断言只接受 `*-cygwin`/`*linux*`（`build_official.sh:31`、`run_interop.sh:38`），`x86_64-apple-darwin…` 会被拒；② `/usr/bin/timeout` 在 macOS 上不存在（两条脚本用它包每次执行）；③ `sha256sum`/`stat -c` 这两处已在 §8.3 第 3 条改成 fail-closed + POSIX 写法；④ `cp -a` 是 GNU 拼写，BSD 侧待核。§8.3 第 1 条（`CC` 判据）与第 2 条（`find -quit`）也正是为这条通路铺的 |
+| T7 | §4 的告警集合（Linux gcc 12 与 MSYS gcc 15.2 各 6 条，MINGW64 gcc 16.1 与 clang64 各 8 条） | 未改，属既有代码质量；位置已逐条对过官方源（§4 第二张表） | 逐条清（先 `table.c:420` 的 const 丢弃），改完四条通路各重跑一次 |
 | T8 | 官方 `corruption_test`（P1-2 → P2-3） | 需先实现故障注入 Env，非环境缺口 | 见 doc/06 P1-2 |
 
 ---

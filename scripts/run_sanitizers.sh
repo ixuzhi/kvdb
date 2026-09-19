@@ -25,12 +25,15 @@
 #      SAN_DETECT_LEAKS=1 turns LeakSanitizer on (unsupported on Windows).
 set -uo pipefail
 REPO=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-# Default compiler follows the host: Windows cross targets need clang, a POSIX
-# host toolchain already carries its own sanitizer runtimes.
+# Default compiler follows the host: only a *linux* host compiler is known to
+# carry its own sanitizer runtime. Anything else stays on clang64 - including
+# the case where /usr/bin/gcc does not exist at all, which is what an ordinary
+# Git Bash looks like even though a cygwin gcc sits further along PATH. Picking
+# gcc there would trade an actionable message for a doomed link step.
 if [[ -z "${CC:-}" ]]; then
   case "$(/usr/bin/gcc -dumpmachine 2>/dev/null)" in
-    *cygwin*|*mingw*|*windows*) CC=clang ;;
-    *) CC=gcc ;;
+    *linux*) CC=gcc ;;
+    *) CC=clang ;;
   esac
 fi
 SAN=${SAN:--fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all}
@@ -68,6 +71,19 @@ if ! command -v "$CC" >/dev/null 2>&1; then
   fi
   exit 2
 fi
+# A Windows-family triple plus a compiler that is not clang cannot produce this
+# build at all: MSYS2 ships no libasan/libubsan for gcc on any Windows target,
+# so the failure would otherwise surface minutes later as a link error nobody
+# read. Also has to come before the object-tree wipe below.
+case "$TRIPLE" in
+  *cygwin*|*mingw*|*windows*)
+    if [[ $CC != *clang* ]]; then
+      printf '%s: %s targets %s, and no MSYS2 gcc carries a sanitizer runtime.\n' \
+             "$0" "$CC" "$TRIPLE" >&2
+      printf 'Use clang: CC=clang from an "MSYS2 CLANG64" shell.\n' >&2
+      exit 2
+    fi ;;
+esac
 # Evidence lands outside OBJDIR on purpose: the archive must be wiped before a
 # sanitized build (a stale env_posix.o from another toolchain would poison it)
 # and that wipe must not take earlier runs with it.

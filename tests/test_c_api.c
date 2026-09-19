@@ -38,14 +38,11 @@ TEST(c_api, PutGetDelete) {
   CHECK(err == NULL);
 
   leveldb_readoptions_t* ro = leveldb_readoptions_create();
-  size_t vallen = 0;
+  size_t vallen = 12345;
   char* got = leveldb_get(db, ro, key, 3, &vallen, &err);
   CHECK(got == NULL);
-  CHECK(err != NULL);
-  CHECK_STR_CONTAINS(err, "NotFound");
-  leveldb_free(err);
-  err = NULL;
-
+  CHECK_EQ(0, (long long)vallen);
+  CHECK(err == NULL);
   leveldb_put(db, wo, key, 3, val, 5, &err);
   CHECK(err == NULL);
   got = leveldb_get(db, ro, key, 3, &vallen, &err);
@@ -83,9 +80,7 @@ TEST(c_api, WriteBatch) {
   size_t vallen = 0;
   char* got = leveldb_get(db, ro, "one", 3, &vallen, &err);
   CHECK(got == NULL);
-  CHECK(err != NULL);
-  leveldb_free(err);
-  err = NULL;
+  CHECK(err == NULL);
   got = leveldb_get(db, ro, "two", 3, &vallen, &err);
   CHECK(got != NULL);
   CHECK_STR_EQ("2", got);

@@ -285,7 +285,7 @@ TEST(bloom, VaryingLengths) {
     }
 
     double rate = bloom_false_positive_rate(&t);
-    CHECK_LE(rate, 0.02);  // Must not be over 2%
+    CHECK(rate <= 0.02);  // Must not be over 2%
     if (rate > 0.0125) {
       mediocre_filters++;  // Allowed, but not too often
     } else {

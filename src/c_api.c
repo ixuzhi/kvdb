@@ -186,15 +186,15 @@ typedef struct bloom_bridge {
   const ldb_filterpolicy* internal;
 } bloom_bridge;
 
-static const ldb_filterpolicy* bloom_internal(leveldb_filterpolicy_t* lp) {
-  bloom_bridge* b = (bloom_bridge*)lp->state;
+static const ldb_filterpolicy* bloom_internal(void* state) {
+  bloom_bridge* b = (bloom_bridge*)state;
   return b->internal;
 }
 
 static char* bloom_create(void* state, const char* const* key_array,
                           const size_t* key_length_array, int num_keys,
                           size_t* filter_length) {
-  const ldb_filterpolicy* internal = bloom_internal((leveldb_filterpolicy_t*)state);
+  const ldb_filterpolicy* internal = bloom_internal(state);
   ldb_slice* keys =
       (ldb_slice*)malloc(sizeof(ldb_slice) * (size_t)(num_keys > 0 ? num_keys : 1));
   for (int i = 0; i < num_keys; i++) {
@@ -213,14 +213,14 @@ static char* bloom_create(void* state, const char* const* key_array,
 
 static uint8_t bloom_match(void* state, const char* key, size_t length,
                            const char* filter, size_t filter_length) {
-  const ldb_filterpolicy* internal = bloom_internal((leveldb_filterpolicy_t*)state);
+  const ldb_filterpolicy* internal = bloom_internal(state);
   ldb_slice k = ldb_slice_make(key, length);
   ldb_slice f = ldb_slice_make(filter, filter_length);
   return (uint8_t)(internal->key_may_match(internal, &k, &f) != 0);
 }
 
 static const char* bloom_name(void* state) {
-  const ldb_filterpolicy* internal = bloom_internal((leveldb_filterpolicy_t*)state);
+  const ldb_filterpolicy* internal = bloom_internal(state);
   return internal->name(internal);
 }
 
@@ -552,7 +552,12 @@ char* leveldb_get(leveldb_t* db, const leveldb_readoptions_t* options,
       *vallen = tmp.size;
     }
   } else {
-    save_error(errptr, &s);
+    if (vallen != NULL) {
+      *vallen = 0;
+    }
+    if (s.code != LDB_NOTFOUND && errptr != NULL) {
+      save_error(errptr, &s);
+    }
   }
   ldb_status_destroy(&s);
   ldb_buffer_destroy(&tmp);

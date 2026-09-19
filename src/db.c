@@ -592,16 +592,15 @@ static void compact_mem_table(ldb_db_impl* impl) {
   } else {
     record_background_error(impl, s);
   }
+  ldb_status_destroy(&s);
   ldb_version_edit_destroy(&edit);
 }
 
 // ------------------------------------------------------------------ compaction driving
 static void record_background_error(ldb_db_impl* impl, ldb_status s) {
   if (ldb_ok(impl->bg_error)) {
-    impl->bg_error = s;
+    impl->bg_error = ldb_status_copy(s);
     ldb_cond_signal_all(&impl->background_work_finished_signal);
-  } else {
-    ldb_status_destroy(&s);
   }
 }
 
@@ -721,6 +720,7 @@ static void background_compaction(ldb_db_impl* impl) {
     }
     impl->manual_compaction = NULL;
   }
+  ldb_status_destroy(&status);
   ldb_buffer_destroy(&manual_end);
 }
 
@@ -830,7 +830,6 @@ static void cleanup_compaction(ldb_db_impl* impl,
     ldb_buffer_destroy(&compact->outputs[i].largest);
   }
   free(compact->outputs);
-  ldb_compaction_destroy(compact->compaction);
   free(compact);
 }
 
@@ -1259,6 +1258,7 @@ ldb_status ldb_db_impl_get(ldb_db_impl* impl, const ldb_read_options* options,
   ldb_memtable_unref(mem);
   if (imm != NULL) ldb_memtable_unref(imm);
   ldb_version_unref(current);
+  ldb_mutex_unlock(&impl->mutex);
   return s;
 }
 
@@ -1399,9 +1399,8 @@ static ldb_status make_room_for_write(ldb_db_impl* impl, int force) {
         // Switch to the new log file anyway, but record as a background
         // error so we do not attempt any more writes.
         record_background_error(impl, cs);
-      } else {
-        ldb_status_destroy(&cs);
       }
+      ldb_status_destroy(&cs);
       impl->logfile->m->destroy(impl->logfile);
 
       impl->logfile = lfile;

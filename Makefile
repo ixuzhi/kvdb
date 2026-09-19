@@ -19,7 +19,9 @@ LIB_SRCS := $(SRCDIR)/port.c $(SRCDIR)/util.c $(SRCDIR)/env.c $(SRCDIR)/env_win.
 
 TEST_SRCS := tests/test_main.c tests/test_util.c tests/test_cache.c \
              tests/test_log.c tests/test_batch.c tests/test_skiplist.c \
-             tests/test_table.c tests/test_db.c tests/test_c_api.c
+             tests/test_table.c tests/test_db.c tests/test_c_api.c \
+             tests/test_format_extra.c tests/test_recovery_extra.c \
+             tests/test_api_extra.c
 
 # Pick the Env backend by compiler target, not host OS: MSYS2 runs on
 # Windows but targets the POSIX emulation (no _WIN32, no windows.h).

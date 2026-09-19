@@ -69,15 +69,22 @@ void ldb_test_destroy_dir(const char* path) {
   ldb_env_delete_dir(env, path);
 }
 
+static int run_one(ldb_test_entry* e) {
+  g_current_test = e->name;
+  if (setjmp(g_test_jmp) == 0) {
+    e->fn();
+    return 0;
+  }
+  return 1;
+}
+
 int ldb_test_run_all(void) {
   int failed = 0;
   int ran = 0;
   for (ldb_test_entry* e = g_tests; e != NULL; e = e->next) {
     printf("[ RUN      ] %s\n", e->name);
     fflush(stdout);
-    g_current_test = e->name;
-    if (setjmp(g_test_jmp) == 0) {
-      e->fn();
+    if (run_one(e) == 0) {
       printf("[       OK ] %s\n", e->name);
     } else {
       printf("[   FAILED ] %s\n", e->name);
@@ -87,7 +94,7 @@ int ldb_test_run_all(void) {
     fflush(stdout);
   }
   printf("%d tests, %d failed\n", ran, failed);
-  return failed ? 1 : 0;
+  return (failed || ran == 0) ? 1 : 0;
 }
 
 int main(int argc, char** argv) {
@@ -105,9 +112,7 @@ int ldb_test_run_matching(const char* pattern) {
     if (!strstr(e->name, pattern)) continue;
     printf("[ RUN      ] %s\n", e->name);
     fflush(stdout);
-    g_current_test = e->name;
-    if (setjmp(g_test_jmp) == 0) {
-      e->fn();
+    if (run_one(e) == 0) {
       printf("[       OK ] %s\n", e->name);
     } else {
       printf("[   FAILED ] %s\n", e->name);
@@ -117,5 +122,5 @@ int ldb_test_run_matching(const char* pattern) {
     fflush(stdout);
   }
   printf("%d tests, %d failed\n", ran, failed);
-  return failed ? 1 : 0;
+  return (failed || ran == 0) ? 1 : 0;
 }

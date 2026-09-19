@@ -177,13 +177,12 @@ void ldb_block_builder_reset(ldb_block_builder* b) {
 
 void ldb_block_builder_add(ldb_block_builder* b, const ldb_slice* key,
                            const ldb_slice* value) {
-  const ldb_comparator* ucmp = NULL;
+  const ldb_comparator* comparator = b->options->comparator;
   ldb_slice last_key_piece = ldb_buffer_slice(&b->last_key);
   assert(!b->finished);
   assert(b->counter <= b->options->block_restart_interval);
   assert(ldb_buffer_empty(&b->buffer) ||
-         ldb_slice_compare(key, &last_key_piece) > 0);
-  (void)ucmp;
+         comparator->compare(comparator, key, &last_key_piece) > 0);
   size_t shared = 0;
   if (b->counter < b->options->block_restart_interval) {
     // See how much sharing to do with previous string

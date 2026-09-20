@@ -51,7 +51,7 @@ OFFICIAL_DBS=build/interop/golden-20260919-153942 bash scripts/run_sanitizers.sh
    `-fsanitize=address,undefined -fno-omit-frame-pointer
    -fno-sanitize-recover=all` 重建**整个**引擎（`OBJDIR=build/san`，先清对象树；
    `SAN=` 可整串覆盖，例如只留 `-fsanitize=address` 单独看某一条报告）；
-2. 跑移植的 127 个用例；
+2. 跑移植的 130 个用例；
 3. 用**未经修改的官方** `leveldb/db/c_test.c` 直接链接这份带插桩的库；
 4. 编译 `tests/interop/golden_driver.c` 对同一份带插桩的库做 create/verify，
    覆盖 10 种确定性负载；给了 `OFFICIAL_DBS` 时，verify 读的是**真实 leveldb
@@ -155,6 +155,7 @@ Windows 上 `DestroyDB` 之后同路径重开报 win32 error 32（共享冲突�
 | 另外两条工具链（不带 sanitizer） | MSYS `env_posix` 127-127；MINGW64 `env_win` 静态 127-127 且官方 `c_test` PASS |
 | 改动后重跑跨引擎黄金比对 | rc=0，严格模式仍 9/9 负载、33 个文件逐字节相同、109 项 PASS |
 | 2026-09-20 原生 Linux（gcc，**LSan 默认开启**） | `127 tests, 0 failed` + 官方 `c_test` 16 阶段 + 10 负载 create/verify 全 `rc=0`、**含零泄漏报告**；打开这条检查的首跑报 `929,842 byte(s) / 201 allocation(s)`，逼出的五族缺陷见 §6 与 doc/08 §11 |
+| 2026-09-20 原生 Linux 第三轮（同一批改动 + 新增 3 例） | **`rc=0`**：130 例 + 官方 `c_test` 16 阶段 + 10 负载 create/verify，ASan/UBSan/LSan 三者零报告。这一轮 LSan 报的 144 B / 3 个分配**不在引擎里**，在黄金驱动 `tests/interop/golden_driver.c`：它建了 bloom 策略却从不销毁——上一轮之所以看不见，是 `src/util.c` 里那个全局单例把指针变成了 LSan 的根，见 §7 第三条 |
 
 留档：`build/san-runs/interop-<时间戳>/{run.log,build.log,unit.log,c_test.log,<mode>.log}`。
 
@@ -190,7 +191,7 @@ Windows 上 `DestroyDB` 之后同路径重开报 win32 error 32（共享冲突�
   `c_test` 与黄金驱动都跑在它上面——不是因为这条跨后端通路（doc/06 P2-9）。
 - 未做长时间压测与故障注入 Env（doc/06 P2-2、P1-2）。
 
-## 7. 两处"看起来是缺陷其实不是"
+## 7. 三处"看起来是缺陷其实不是"
 
 - clang64 首跑时 api_extra/c_api 共 18 例全红：该 shell 没设 `TMP`，
   `GetTempPathA` 逐级回落到 `C:\Windows`，测试无法建目录。环境而非引擎，
@@ -198,6 +199,14 @@ Windows 上 `DestroyDB` 之后同路径重开报 win32 error 32（共享冲突�
 - 跨引擎摘要一度在 `edge`/`wal-big` 上"不一致"：我写的驱动里
   `fnv(h, leveldb_iter_key(it, &kn), kn)` 三个实参求值顺序未定，`kn` 可能是
   上一轮的长度。引擎无差异，驱动已改。
+- **修掉一个全局单例，LSan 立刻报出一批"新"泄漏**（2026-09-20 第三轮）。
+  `ldb_get_internal_filter_policy` 原本返回一个 `static` 对象的地址，于是所有
+  经由它到达的分配在 LSan 眼里都"从全局根可达"、一律不报。改成按实例初始化
+  （`ldb_init_internal_filter_policy`，doc/04 E-19）之后抑制消失，同一条腿
+  报了 `144 byte(s) / 3 allocation(s)`，地址全在 `tests/interop/golden_driver.c`
+  ——驱动自己 `leveldb_filterpolicy_create_bloom` 却从不销毁（官方
+  `leveldb_options_destroy` 也不接管策略）。**这不是回归**：缺陷一直在，
+  只是那个单例替它挡住了报告。教训是"绿色变红"要先问"是新坏的，还是刚看得见"。
 
 另记一处我自己埋的测试 bug，正好说明 sanitizer 的边界：`arena.*` 用例初版只
 申请 `sizeof(ldb_skiplist_node)`（含 1 个 `next` 槽），却写了 `next[1]`——越界

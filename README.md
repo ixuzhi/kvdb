@@ -6,7 +6,7 @@ WAL / MANIFEST / CURRENT）与 LevelDB **逐字节兼容**（由跨引擎黄金�
 验证，见下节），并把 LevelDB 的测试用例集移植到 C 后全部跑通。
 
 ```text
-127 tests, 0 failed
+130 tests, 0 failed
 ```
 
 ## 目录结构
@@ -130,7 +130,15 @@ Cygwin）用 `env_posix.c` + pthread。五条已实测的工具链：
 | 独立 Cygwin gcc 14.4 | `x86_64-pc-cygwin` | `env_posix.c` | 127/127 + 黄金比对 + 官方 `c_test` |
 | MinGW64 gcc 16（`MSYSTEM=MINGW64`，含 w64devkit） | `x86_64-w64-mingw32` | `env_win.c`（静态） | 127/127 + 官方 `c_test` 通过 |
 | MSYS2 clang 22（`MSYSTEM=CLANG64`） | `x86_64-w64-windows-gnu` | `env_win.c`（动态） | 127/127，ASan+UBSan 零报告 |
-| 原生 Linux gcc 12.2（Debian glibc） | `x86_64-linux-gnu` | `env_posix.c` | 127/127 + 黄金比对 + 官方 `c_test` + ASan/UBSan **与 LSan** 零报告（Linux 上泄漏检查默认开） |
+| 原生 Linux gcc 12.2（Debian glibc） | `x86_64-linux-gnu` | `env_posix.c` | **130/130** + 黄金比对 + 官方 `c_test` + ASan/UBSan **与 LSan** 零报告（Linux 上泄漏检查默认开） |
+
+套件规模从上表四条 Windows 通路的 127 例涨到 130 例，是原生 Linux 第三轮
+（2026-09-20 的 C 语言使用检查）加的三个用例——`db.RepairWalWithBloomFilter`
+（E-21）、`db.MemenvRenameSemantics`（E-25）、`db.EmptySlicesWithFilesInHigherLevels`
+（E-22，这一条只在 sanitizer 腿才红）；那四条通路仍在 127 例规模上认证，
+**同一套源码尚未在 Windows 上复跑**，复跑待办记在 doc/06。同一轮把
+`-Wall -Wextra` 的告警基线在 Linux 上从 6 条清到 **0 条**（doc/04 E-24），
+上表 clang64 那一行的"零报告"指的是 sanitizer 报告，与告警数是两回事。
 
 前两行是本轮新测的，写在 `doc/09-Windows工具链矩阵与Cygwin验证.md`。这里
 有一个容易踩空的地方：MSYS2 的 msys 层是 Cygwin 的 fork，但它的 gcc 报的
@@ -182,7 +190,7 @@ MSYS2（`env_posix.o`）与 MinGW64（`env_win.o`）混用同一 `build/`
 MSYSTEM=MSYS   bash scripts/run_interop.sh   # POSIX 后端 + 跨引擎互操作
 bash scripts/run_cross_backend.sh            # env_posix 与 env_win 的逐字节等价
 MSYSTEM=MINGW64 make OBJDIR=build_mingw BINDIR=build_mingw && ./build_mingw/kvdb_tests
-MSYSTEM=CLANG64 bash scripts/run_sanitizers.sh  # ASan+UBSan：127 例 + 官方 c_test + golden 驱动
+MSYSTEM=CLANG64 bash scripts/run_sanitizers.sh  # ASan+UBSan：130 例 + 官方 c_test + golden 驱动
 bash scripts/run_sanitizers.sh                # 原生 Linux：同上，但用 gcc 的 sanitizer 运行时
 ```
 
@@ -271,7 +279,7 @@ msys 与 Cygwin 在磁盘上看得见彼此、在运行时却互不可见，串�
   58 项 PASS、0 FAIL（doc/09 §5）。
 - `scripts/run_sanitizers.sh`：同一批证据在 `-fsanitize=address,undefined
   -fno-omit-frame-pointer -fno-sanitize-recover=all` 下重跑一遍
-  （127 例 + 官方 `c_test` + `golden_driver` 的 create/verify，可选
+  （130 例 + 官方 `c_test` + `golden_driver` 的 create/verify，可选
   `OFFICIAL_DBS=` 指向官方引擎写出的目录做验证）。编译器按主机选：
   Windows 用 clang64（MSYS2 无 gcc sanitizer 运行时），Linux 用 gcc。
   任何一条 sanitizer 报告都会让进程直接终止，所以"退出码为 0"就是

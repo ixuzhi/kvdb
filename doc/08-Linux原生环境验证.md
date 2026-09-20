@@ -5,6 +5,12 @@
 发现并修复的缺陷（doc/06 P0-10）、踩到的两个工具链坑、以及"哪些仍然没覆盖"。
 **次日（2026-09-20）的第二轮另记 §11**：打开 LeakSanitizer、闭合 §9 的 T1（引擎侧与
 测试侧共五族泄漏被修掉），并把四条腿在最新代码上全部复跑一遍。
+**同日第三轮另记 §12**：再做一次全量复跑 + 一次 **C 语言使用检查**（严格警告矩阵、
+`-fanalyzer`、逐文件人工复查），产出引擎级 6 条与测试级 3 条修复、3 个新用例
+（套件 127 → **130**）、告警基线 6 → **0**。
+
+> §1 那张表是**首轮（2026-09-19）**的读数，保留是为了能看出每一轮各自量到什么；
+> 仓库当前状态的读数以 **§12.2** 为准。
 
 背景：在此之前所有实测证据都来自 Windows 系的三条工具链（MSYS2 `env_posix`、
 MinGW64 `env_win` 静态、clang64 `env_win` 动态），`doc/06` 的 P2-1 因此一直挂着
@@ -151,7 +157,9 @@ TMPDIR=/root/work/kvdb/build_linux/tmp ./build/kvdb_tests   # 127 tests, 0 faile
 ```
 
 gcc 12 在 `-Wall -Wextra` 下的 6 条告警（Linux 这轮的构建日志首次逐条记下；
-均为既有代码质量问题，不是 Linux 行为差异，未在本轮修改）：
+均为既有代码质量问题，不是 Linux 行为差异，**当时**未在本轮修改）：
+**这 6 条已于 2026-09-20 第三轮全部清零**，去向见下面第二张表的"清理方式"列
+与 doc/04 E-24（`inputs0_size` 那条由 E-23 移植官方日志行时自然转成"被使用"）。
 
 | 位置 | 告警 |
 |---|---|
@@ -172,7 +180,7 @@ gcc 12 在 `-Wall -Wextra` 下的 6 条告警（Linux 这轮的构建日志首�
 | `version_set.c:1562 inputs0_size` | `db/version_set.cc:1406` 同名变量只喂给 1422 行的 `fprintf` 调试行 | 删；分支条件实际用的是 `inputs1_size + expanded0_size`，两边一致 |
 | `db.c:447 compactions` | 官方 `db_impl.cc:472` **读它**：`reuse_logs && last_log && compactions == 0` | 别顺手删——它在 kvdb 无人读只因为 `reuse_logs` 未实现（doc/06 P1-1，`src/db.c:499` 已注明恒按 false），实现 P1-1 时正好要用 |
 | `version_set.c:1190 read_records` | 官方 `version_set.cc:988` 只把它打进调试行 | 删 |
-| `table.c:420` const 丢弃 | 官方把 filter 块**复制**进 `new char[]` | 改 `t->filter_data = block.alloc;`——`block.data.data` 本就是同一个 `buf` 的 const 视图，换过去既消警告又与下一行 `block.alloc = NULL` 的"转移所有权"意图对齐 |
+| `table.c:420` const 丢弃 | 官方把 filter 块**复制**进 `new char[]` | 改 `t->filter_data = block.alloc;`——`block.data.data` 本就是同一个 `buf` 的 const 视图，换过去既消警告又与下一行 `block.alloc = NULL` 的"转移所有权"意图对齐。**2026-09-20 第三轮没照这条做**：留在 `data.data` 上加了 `(char*)` 与一句所有权注释（doc/04 E-24）。两个写法都能消掉这一条警告，选后者的理由是"取的是刚读出来的那个 slice 的字节"这件事由 `data` 表达更直接，而 `-Wcast-qual` 在引擎里另有 43 处同族、消不完（§12.3） |
 | `env_mem.c:66`、`c_api.c:62`、`test_cache.c:13`、`test_db.c:125` | 官方无对应物，是移植/测试辅助留下的死 static | 删（或标 `__attribute__((unused))`，但那是掩盖） |
 
 另：跑完留下 6 个 `$TMPDIR/leveldbtest-<pid>` 目录。这是**每进程一个**的 scratch 命名
@@ -405,7 +413,8 @@ gcc 15.2 与 Linux gcc 12 报出**完全相同的 6 处**，MINGW64 gcc 16.1 与
 ## 9. 仍**未**覆盖（TODO，按决定本轮延后）
 
 已确认延后的四项 Linux 独有增量是 T1–T4；T5–T8 是随之记下的既有遗留。
-**T1 已于次日（2026-09-20）关闭，见 §11；其余七项状态未变。**
+**T1 已于次日（2026-09-20）关闭，见 §11；T7 已于同日的第三轮在 Linux 侧关闭，
+见 §12.2–§12.3（Windows 四条腿未复跑）；其余六项状态未变。**
 **注意 T1–T5 里凡是提到"包已就位"的，首轮结束时都已卸掉**（§3），
 次日第二轮开工前的实际包状态另见 §3 末小节。重装要两个
 开关一起给，否则 apt 会去拉 `lcov` 的 recommends（`libgd-perl` 等，缓存里没有）而报
@@ -423,7 +432,7 @@ apt-get install --no-install-recommends --no-download -y g++ libsnappy-dev lcov 
 | T4 | **多进程锁语义专项**（P2-6） | Linux 的 `fcntl` 区域锁与 Windows 独占打开语义不同，只有原生 POSIX 能测真值 | 两进程同时 `leveldb_open` 同一目录，断言第二个拿到 `IO error`；与官方 `env_posix` 行为对照 |
 | T5 | snappy 压缩模式并入正式腿（P2-8，见 §7） | 探路已完成 | 决定官方库是否默认开 `HAVE_SNAPPY`，并加 `sst-snappy` 模式 |
 | T6 | macOS 实机确认（P2-1 的另一半） | Linux 那轮的机器与这台 Windows 机都没有 macOS | 同 L0/L1 两条腿；注意 `HAVE_FULLFSYNC=1` 会让 port 配置探针结果不同。**动身前先按源码读到的四处 GNU 依赖做准备**：① 三元组断言只接受 `*-cygwin`/`*-msys`/`*linux*`（`build_official.sh`、`run_interop.sh`；2026-09-20 补了 `*-msys`），`x86_64-apple-darwin…` 会被拒；② `/usr/bin/timeout` 在 macOS 上不存在（两条脚本用它包每次执行）；③ `sha256sum`/`stat -c` 这两处已在 §8.3 第 3 条改成 fail-closed + POSIX 写法；④ `cp -a` 是 GNU 拼写，BSD 侧待核。§8.3 第 1 条（`CC` 判据）与第 2 条（`find -quit`）也正是为这条通路铺的 |
-| T7 | §4 的告警集合（Linux gcc 12 与 MSYS gcc 15.2 各 6 条，MINGW64 gcc 16.1 与 clang64 各 8 条） | 未改，属既有代码质量；位置已逐条对过官方源（§4 第二张表） | 逐条清（先 `table.c:420` 的 const 丢弃），改完四条通路各重跑一次 |
+| T7 | ~~§4 的告警集合（Linux gcc 12 与 MSYS gcc 15.2 各 6 条，MINGW64 gcc 16.1 与 clang64 各 8 条）~~ | **Linux 侧已关闭（2026-09-20 第三轮）**：`make clean && make -j4` 现在 **0 error / 0 warning**，`130 tests, 0 failed`。六条的去处是三处死码删除（`fs_dir_exists`/`unwrap_comparator`/`cache_key`）、一处可见性（`vs_setup_other_inputs` 补 `static`）与一处 `unused-variable`，逐条见 doc/04 E-24；**Windows 四条腿未复跑**，那 6/6/8/8 是改前值 | 剩下的活只有一件：在四条 Windows 通路上各重跑一次 `make clean && make -j4` 并把 `LC_ALL=C` 下的告警数记账（doc/06 文末待办）。`table.c:426` 的 const 丢弃**没有改**，是补了所有权注释——那 44 条 `-Wcast-qual` 是这套 C 写法的固有代价，见 §12.3 |
 | T8 | 官方 `corruption_test`（P1-2 → P2-3） | 需先实现故障注入 Env，非环境缺口 | 见 doc/06 P1-2 |
 
 ---
@@ -519,3 +528,152 @@ leak check: ON (SAN_DETECT_LEAKS=0 to disable), probe says: 0 tests, 0 failed
 根因是本轮 L0 一直在 `OBJDIR=build_linux` 里构建，而跨引擎腿默认吃 `build/`。
 不是缺陷、也不是守卫失灵——守卫正是靠"归档不存在"才没让它链上别的东西。
 `make clean && make -j4` 回到默认 `build/` 后 L1/L2 立即通过。
+
+---
+
+## 12. 2026-09-20 第三轮：全量复跑 + C 语言使用检查
+
+前面十一节问的都是"**这个平台上跑得通吗**"。这一轮换一个问题：
+"**这套 C 代码本身写得对不对，以及工具能替我们看到什么程度**"。
+两件事一起做：① 四条腿（L0/L1/L2/L3）在最终代码上完整重跑；② 一次 C 语言
+使用检查 = 严格警告矩阵（基线之外再叠 16 条诊断）+ `-fanalyzer` 静态分析 +
+逐文件人工复查（所有权、生命周期、`const` 正确性、别名、可移植性写法）。
+
+产物：**引擎级 6 条**（E-19…E-23、E-25）、**测试级 3 条**（T-14/T-15/T-16）、
+**新增 3 个用例**（127 → 130）、**1 条只登记不修**（doc/06 P1-6，编号 D-4）。
+全文在 doc/04；本轮小节在 doc/06 文末。
+
+### 12.1 环境增量：**0 个包**
+
+本轮没有装任何东西，也没有卸。开工前后各取一次包名全集：
+`dpkg-query -W -f='${Package}\n' | sort -u` 两侧都是 **627** 个，
+`comm` 双向为空（新增 0、消失 0）。手工标记（`apt-mark showmanual`）同样不变。
+§3 那张卸载清单因此仍然有效，不需要更新。
+
+### 12.2 四条腿的最终读数
+
+| 腿 | 命令 | 结果 | 留档 |
+|---|---|---|---|
+| L0 | `make clean && make -j4` → `./build/kvdb_tests` | 构建 **0 error / 0 warning**（改前基线是 6 条）；**`130 tests, 0 failed`** | `/tmp/R5-build-final2.log`、本轮复跑输出 |
+| L1 | `bash scripts/run_golden.sh` | `rc=0`：109 PASS / 33 SAME / 1 DIFF（`levels` 布局，P2-7 允许）+ 1 INFO / **0 FAIL**；`results.tsv` **145 行** | `build/interop/golden-20260920-050206/` |
+| L2 | `RUN_C_TEST=1 bash scripts/run_interop.sh` | `rc=0`：65 阶段全 `rc=0`；未修改的官方 `c_test` `rc=0`；`SKIP Snappy interop`（本机无 `libsnappy-dev`，P2-8 原样保留） | `build/interop/run-m68B3TDI/` |
+| L3 | `bash scripts/run_sanitizers.sh` | `rc=0`，`leak check: ON`；130 例 + 官方 `c_test`(16 phases) + 10 负载 create/verify **零 ASan/UBSan/LSan 报告** | `build/san-runs/interop-20260920-050327/` |
+
+**字节中性这条又被独立量了一次**：本轮动了 `db.c`/`repair.c`/`version_set.c`/
+`util.c`/`kvdb.h`/`env_mem.c`/`table.c`/`memtable.c`/`cache.c`/`c_api.c` 十处控制流
+或生命周期，而 L1 的 `results.tsv` 与泄漏修复轮（`golden-20260920-003147`）
+**逐字节相同**：两边摘要都是 `c11044f19bd73d8f…`，`cmp` 为空。
+L3 的 `sst-bigblock` 摘要仍是 `714b697132214d29`，与 Windows 侧那两遍一致。
+
+新用例的"先红后绿"是在 **pristine HEAD** 的独立 worktree 里量的（随后清掉）：
+
+| 新用例 | HEAD 症状 | 现在 |
+|---|---|---|
+| `db.RepairWalWithBloomFilter`（D-3） | `FAIL tests/test_db.c:718: 1 == dbt_get(...) (1 vs 0)` | PASS |
+| `db.MemenvRenameSemantics`（E-25） | 跑到该例即 `rc=139`（SIGSEGV，自改名释放后继续用 `f->name`） | PASS |
+| `db.EmptySlicesWithFilesInHigherLevels`（E-22） | `rc=0`——**只在 sanitizer 腿才红**，这类"sanitizer-only 用例"值得单记 | PASS（且 L3 零报告） |
+
+### 12.3 严格警告矩阵：16 条额外诊断，只有 `-Wcast-qual` 有输出
+
+做法（**必须走 `SANFLAGS`**，给 `CFLAGS=` 会吞掉 Makefile 的 `+=` 追加，正是 §6 坑①）：
+
+```bash
+make clean && make -j4 OBJDIR=/tmp/strictA BINDIR=/tmp/strictA \
+  SANFLAGS="-Wpedantic -Wshadow -Wstrict-prototypes -Wmissing-prototypes \
+            -Wold-style-definition -Wredundant-decls -Wpointer-arith -Wcast-align \
+            -Wwrite-strings -Wformat=2 -Wnull-dereference -Wshift-overflow \
+            -Wduplicated-cond -Wimplicit-fallthrough -Wvla -Wcast-qual"
+```
+
+结果：**`-Wcast-qual` 49 条 / 48 个位置**（`tests/test_db.c:722` 一行两处），
+其余 **15 条全部为空**。分布是 `src/` 44 条（13 个文件，`version_set.c` 7 条最多）、
+`tests/` 5 条。
+
+这 44 条**没有一条可以直接行动**——它们全是同一句话的两种写法：
+① vtable 下转（`ldb_iterator*` → `ldb_memtable_iterator*` 一类，`const` 在
+官方 C++ 里由 `const` 成员函数承担，C 里没有对应的落点）；② "缓存/表持有键的字节"
+却要把键交给一个不收 `const` 的底层 API。也就是说 `-Wcast-qual` 在这套代码上
+量的是"C++ 的 const 系统比 C 的表达力强"这件事，不是缺陷密度。
+测试侧那 5 条同形（`test_db.c:722` 是本轮换掉的策略 `->destroy()`，两个 cast 在同一行）。
+
+### 12.4 `-fanalyzer`：97 条 / 7 个 checker，五族形状**零真阳性**
+
+```bash
+make clean && make OBJDIR=/tmp/fa SANFLAGS="-fanalyzer" -j4   # 留档 /tmp/R5-fanalyzer.log
+```
+
+| checker | 条数 |
+|---|---|
+| `-Wanalyzer-possible-null-dereference` | 58 |
+| `-Wanalyzer-possible-null-argument` | 19 |
+| `-Wanalyzer-malloc-leak` | 9 |
+| `-Wanalyzer-null-argument` | 5 |
+| `-Wanalyzer-use-of-uninitialized-value` | 4 |
+| `-Wanalyzer-null-dereference` | 1 |
+| `-Wanalyzer-double-free` | 1 |
+
+逐族判定（每族都到具体行看过）：
+
+| 形状 | 覆盖条数 | 为什么不是缺陷 |
+|---|---|---|
+| **`assert` 当 OOM 策略**：`malloc`/`realloc`/`strdup` 的返回值没判空就用 | 82（58+19+5） | 仓库的分配失败策略就是 `assert(p)`——这与官方 C++ 的 `new` 抛 `bad_alloc` 是同位替换，不是"忘了检查"。分析器不知道这条约定，于是把"NULL 被解引用"的整条路径都吐出来。**要消掉它要么全局判空（与官方分歧更大），要么给它一份约定文件（没有这种东西）** |
+| **按值搬运**：`ldb_status` 按值穿过 vtable 槽、`ldb_buffer_swap` 的三条整体赋值（`src/util.c:71`） | use-of-uninitialized-value 里的 3 条 `offsetof(ldb_status, code)` + `leak of 'tmp.data'` 2 条 | 值语义结构体换了名字/换了位置，路径敏感状态机认不出 store 跟过去了。C++ 里 `std::string` 移动赋值同理，只是分析器对 libstdc++ 有专门建模、对本仓库的 C 结构没有 |
+| **首成员强转与 `free(&b->base)`**（`src/util.c:753`；`src/cache.c:40/96`） | `leak of 'b'` 1 条、`leak of '<unknown>'` 2 条 | `base` 是结构体首成员，`&b->base == (void*)b`——C 保证成立，分析器不推这件事。`free(t->list)` 之后紧接着 `t->list = new_list` 也是同一个"换名"问题 |
+| **grow-by-realloc 的出参**（`src/version_set.c:247`、`src/repair.c:183/190`） | `leak of 'inputs'`/`'expanded0'`/`'tables'`、`double-‘free’ of ‘logs’` | 出参指向的列表由调用方持有、被 `realloc` 换过地址；`repair.c:183` 那句更直接：`logs` 与 `tables` 是两条独立列表，分析器把它们合并成了同一个符号才判成 double-free。LSan 在同一条腿上报 0，这条判罚就是假的 |
+| **测试里故意交的 NULL**（`tests/test_recovery_extra.c:16/191`、`tests/test_api_extra.c:111/118`、`tests/test_util.c:178`） | 6（5 `null-argument` + 1 `null-dereference`） | 这些是**错误路径注入**本身：故意传空串/空缓冲去逼引擎的失败分支。分析器把它们读成"程序会崩" |
+
+**最强的一条反证是跨检查器互斥**：`-fanalyzer` 报了 9 条 `malloc-leak`，
+而 LSan 在同一天、同一棵对象树的上报 **0 泄漏**——一个是模型、一个是运行时实测，
+冲突时运行时赢。所以本轮对 `-fanalyzer` 的结论不是"它没用"，而是
+"**在这套 C 写法上它产不出可直接行动的结论**"：97 条要人读完 97 条才知道是 0 条，
+成本高于收益。人工复查仍是主判据，而 E-19/E-20/E-21 三条全出自人工那一侧。
+
+一处必须记的坑：**`-fanalyzer` 不能配 `-fsyntax-only`**。本轮实测同一份 `src/util.c`：
+`-fsyntax-only -fanalyzer` 吐 **0** 条，去掉 `-fsyntax-only` 真做代码生成则吐 **6** 条。
+分析器挂在 RTL 上，不生成代码就不开工——拿 `-fsyntax-only` 快速扫一遍会得到一次
+"什么都没发现"的假绿。
+
+### 12.5 方法论：LSan 的"可达即不报"会替缺陷打掩护
+
+本轮最值钱的一条不是修掉的哪一处，而是这个：
+
+```
+C++ 析构 → C 显式 destroy 的翻译漏了一处   （真缺陷）
+        ↑
+被一个文件级 static 单例永久钉成"全局可达"  （LSan 因此一条都不报）
+        ↓
+把单例改成按实例存储 → 抑制消失 → 立刻报 144 B / 3 allocations
+```
+
+`ldb_get_internal_filter_policy` 返回 `static` 对象地址（E-19），任何经它可达的
+分配在 LSan 眼里都是根上的活对象。所以**上一轮"零泄漏"有一部分是这块全局撑起来的**。
+推论两条：① 泄漏检查的绿色不是绝对量，它依赖"谁还持有指针"；② 修完一处之后
+LSan 变红，第一反应应该是分辨"**是新坏的，还是刚看得见**"——本轮答案是后者，
+`golden_driver.c` 那个漏销毁从第一天起就在（T-14）。
+
+同一枚硬币的反面也记一句：`-fanalyzer` 因为不知道约定而**多报**，
+LSan 因为看见全局而**少报**。两个方向的偏差都来自"工具在用模型代替代码"，
+所以本轮的每条判定都尽量找了第二个独立工具来对照（LSan↔`-fanalyzer`、
+L1 摘要↔L3 摘要、HEAD worktree 的"先红"↔修复后的"后绿"）。
+
+### 12.6 三条只在插桩构建里出现的报告（登记，不修）
+
+`-Wformat-truncation= null format string` ×3：`src/util.c:79`、
+`src/env_posix.c:341`、`src/env_mem.c:209`（`env_win.c:498` 同形，Linux 腿不参与编译）。
+三处都是 `vsnprintf(NULL, 0, fmt, ap)` 这一句"先探长度"的官方写法。
+**普通 `-O1`/`-O2` 构建一条都不报**，加上 `-fsanitize=address,undefined` 就报
+（本轮实测：插桩构建 3 条，同一行同一文件去掉插桩 0 条）——
+是 ASan 拦截版 `vsnprintf` 让格式串可空性判定走了另一条路径。
+仓内所有调用方给的 `fmt` 都是字面量，判为误报，只登记。
+
+### 12.7 一键复现本轮
+
+```bash
+cd /root/work/kvdb
+export LC_ALL=C                                  # 否则中文 locale 下 grep 'warning:' 恒为 0
+make clean && make -j4 && ./build/kvdb_tests     # L0：0 警告 + 130/0
+bash scripts/run_golden.sh                        # L1
+RUN_C_TEST=1 bash scripts/run_interop.sh          # L2
+bash scripts/run_sanitizers.sh                    # L3（Linux 上默认开 LSan）
+# 12.3/12.4 的两条矩阵命令见各自小节代码块
+```

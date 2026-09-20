@@ -467,6 +467,7 @@ W1（clang64 通路）在本轮之内闭环，结论移到 §8；W2 是写着写
 | W3 | `run_sanitizers.sh` 在 Cygwin 上跑 | Cygwin 无 sanitizer 运行时（§4.3），跑不了；脚本的 `*cygwin*` 分支会正确早退 |
 | W4 | 把 `sst-snappy` 并进黄金比对（doc/06 P2-8） | 需要先定参考库是否默认 `HAVE_SNAPPY=1`，与本轮平台主题无关 |
 | W5 | 多进程互斥的"同进程多实例"分支（doc/06 P2-6 的另一半） | §5 测的是跨进程。同进程内两个 `leveldb_open` 走的是进程内计数锁，仍未单独覆盖 |
+| W6 | `.target` 的键加一维运行时标识（doc/04 N-19） | 本机复跑（§10）发现这台机器的 MSYS2 msys 层报 `x86_64-pc-cygwin`，与独立 Cygwin 同串，于是 N-15 的守卫在这一代放行"跨命名空间复用对象树"。补法已定（用编译器预定义的 `__MSYS__` 而非三元组），但这台机器没有独立 Cygwin，装它不在授权范围内，所以那一半只能推理、不能实测 |
 
 ---
 
@@ -575,4 +576,69 @@ VERIFY live=500 get-digest=714b697132214d29 fwd=fb19636d3ee54fe1 rev=8605be4e177
 
 结论没变，只是这一次是"最终装置"给出的：**引擎侧本轮仍是一行未改**，Windows
 三条工具链 + 跨后端 + clang64 内存安全五条腿都在仓库现在这个样子上跑通。
+
+---
+
+## 10. 第二台 Windows 机器的复跑（2026-09-20 当日，另一台机器）
+
+上面全篇的留档（`cross-20260920-*`、`golden-20260920-*`、`run-D7SUdnww`、
+`san-runs/interop-20260920-013321`）**只存在于跑它的那台机器上**——`build/` 不
+入库，换一台机器就一条都不在。第二台机器上按 §6 的清单复跑，本身就是为了把
+"Windows 已验证"从"某台机器的记录"变回"另一台也能拿到同样的数字"。这一遍用的
+是另一台 Windows 10 19044 + 另一代 MSYS2：
+
+| 本机 | 上面那台 |
+|---|---|
+| MSYS2 msys gcc 15.2.0 / `x86_64-pc-cygwin` | gcc 13.3.0 / `x86_64-pc-msys` |
+| MinGW-w64 由 MSYS2 的 `/mingw64` gcc 16.1.0 代表 | 由 w64devkit gcc 16.2.0 代表 |
+| 独立 Cygwin：**没有**（安装不在授权范围内） | 有，gcc 14.4.0 |
+| clang64 clang 22.1.8 | 同一支 |
+
+也就是说两台的 POSIX 半边报的三元组**不同串**。这本身就是 W2 那条的又一次体现，
+判据两边都收，所以不影响结论。
+
+复跑结果（逐项与上面那台对得上）：
+
+| 项 | 本机 | 留档 |
+|---|---|---|
+| MSYS2 单测（`-Wall -Wextra`，`LC_ALL=C`） | **127/127**，警告 6 条（4×`-Wunused-function`、1×`-Wunused-variable`、1×`-Wdiscarded-qualifiers`），与 §3 的 N-12 基线同数 | `build/local-cross-0920.log` 前半段 |
+| 跨后端整条通路（posix=`/usr/bin/gcc`，windows=`/mingw64/bin/gcc.exe`） | **`rc=0`**：9 个模式、**58 PASS / 33 SAME / 0 FAIL / 0 DIFF**，四方向读取摘要每模式全等 | `build/interop/cross-20260920-105654/` |
+| clang64 ASan+UBSan（最终代码） | **`rc=0`**：127 例 + 官方 `c_test` 16 阶段 + 10 负载 create/verify，零报告 | `build/san-runs/interop-20260920-104955/` |
+| §8 那条跨通路不变量 | **成立**：ASan 构建的 `sst-bigblock` 摘要 `get-digest=714b697132214d29 fwd=fb19636d3ee54fe1 rev=8605be4e1773c06d`，与本机未插桩两个后端逐字符相同，也与 §8 记的串相同 | 两处留档同一串 |
+| N-15 守卫（第二种三元组注入） | 拒绝：`Makefile:72: *** build/ holds objects built for x86_64-pc-cygwin but /mingw64/bin/gcc.exe targets x86_64-w64-mingw32; run 'make clean' before switching toolchains.`；同三元组重建仍是 `Nothing to be done` | — |
+
+这一遍抓到四处新的验证装置缺陷，全在 `run_cross_backend.sh` 与 `Makefile` 的
+`.target` 键上，**引擎仍是一行未改**（详录 doc/04 N-16…N-19）：
+
+- **N-16**：`probe_lock` 把 `who` 和 `db` 写在同一条 `local` 里，而 bash 会先把
+  整条声明展开完再赋值，于是 posix 半边去锁了 `db-windows/lockprobe`。§5 与 §9
+  记的"posix 侧 4/4、3/5"这些数字内容仍然成立（播种方与读取方同一个二进制），
+  但留档里那棵目录的**名字**与它装的后端无关，且两个探针当年共用了一棵树。
+- **N-17**：N-13 的编译器探针把"失败"唯一归因于 `TMP`。本机 `TMP` 是正确的
+  Win32 串，探针仍失败并打印 TMP 处方——真因是 `/mingw64/bin/gcc.exe` 被跨命名
+  空间调用时 `cc1.exe` 起不来（它的 DLL 依赖在 `/mingw64/bin`，不在 PATH 上），
+  而且**一个字都不吐**。现在脚本自己把编译器的 bin 追加到 PATH 末尾，并按"有无
+  输出"分岔诊断。§5 那条"三个自己的坑"清单因此变成四个。
+- **N-18**：锁探针的拒绝分类是 `grep -qiE 'LOCK|…'`，没有词边界——被探测的库就
+  叫 `lockprobe`、负载就叫 `sst-bigblock`。于是一次数据损坏或崩溃只要提到路径
+  就能凑满"至少一次拒绝"，把真缺陷记成"锁工作正常"。这条影响 §5 表里那两行
+  PASS 的**证明力**（数字本身没错），改成匹配 `<db>/LOCK` 加词边界后两侧仍
+  5/3、`rc=0`。
+- **N-19**：`.target` 记三元组，而这一代 MSYS2 与独立 Cygwin 报同一个
+  `x86_64-pc-cygwin`（§4.3 的表 + doc/08 §8.1 各自记着一半），所以 N-15 的守卫
+  在本机这一代是漏的。登记为 W6。
+
+复跑本身的调用形式（与 §6 的清单同构，只是 `CC_WIN` 指到 MSYS2 的 mingw64 层）：
+
+```bash
+MSYSTEM=MSYS /d/ProgramFiles/msys64/usr/bin/bash -c \
+  'export PATH=/usr/bin:/bin; export LC_ALL=C LANG=C;
+   export TMP="$(cygpath -w /tmp)" TEMP="$TMP";
+   export CC_WIN=/mingw64/bin/gcc.exe;
+   cd /d/code/kvdb && bash scripts/run_cross_backend.sh'
+```
+
+`TMP` 必须以 `cygpath -w` 的形状给出（§5 坑 3），`LC_ALL=C` 是为了 §3 的 N-12。
+两个都由外层给定时脚本也能跑，但脚本现在自己会补 `TMP` 与编译器的 bin，
+缺一不再是跑不通的理由。
 

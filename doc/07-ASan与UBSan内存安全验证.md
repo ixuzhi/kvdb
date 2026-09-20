@@ -176,6 +176,13 @@ Windows 上 `DestroyDB` 之后同路径重开报 win32 error 32（共享冲突�
 - **snappy 压缩块的字节级等价**：参考库在无 libsnappy 的环境下把
   `kSnappyCompression` 静默降级为不压缩，黄金比对全在 `no_compression` 下做
   （doc/06 P2-8）。sanitizer 只证明了解码路径没有越界，没证明两边字节相同。
+- **`run_cross_backend.sh` 整条通路不在 sanitizer 下**。它两支引擎都是无插桩构建
+  （脚本调 `make` 时不传 `SANFLAGS`，也就是本文这条通道与那条通路之间没有任何
+  交集；Windows 半边即使想插也无从下手——doc/09 §4.3 的探针显示三支 Windows gcc
+  都 `cannot find -lasan`），所以 8 进程并发争用 `LOCK` 那段、以及"同一份源码
+  两个后端各自读写对方目录"这条新路径，从没被 ASan/UBSan 看过一眼。
+  `env_win.c` 之所以算被内存安全覆盖过，是因为 clang64 三元组选的正是它，
+  `c_test` 与黄金驱动都跑在它上面——不是因为这条跨后端通路（doc/06 P2-9）。
 - 未做长时间压测与故障注入 Env（doc/06 P2-2、P1-2）。
 
 ## 7. 两处"看起来是缺陷其实不是"

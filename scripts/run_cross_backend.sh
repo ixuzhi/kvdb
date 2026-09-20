@@ -95,19 +95,39 @@ if [[ -z "${TMP:-}" && -z "${TEMP:-}" && -z "${TMPDIR:-}" ]]; then
   export TMP="$TW" TEMP="$TW"
   printf 'TMP was unset; pointing the windows half at %s\n' "$TW"
 fi
+# cc1.exe sits in the compiler's own lib/ tree but resolves its DLL dependencies
+# (libgcc_s_seh-1, libwinpthread, ...) through PATH, so an absolute CC_WIN invoked
+# from a foreign namespace exits non-zero *without printing a single word* - and
+# the probe below would report that as a bad TMP. Append, never prepend: /usr/bin
+# has to keep providing make, sed and find.
+CC_WIN_DIR=$(dirname "$CC_WIN")
+if [[ "$CC_WIN" == */* && -d "$CC_WIN_DIR" ]]; then
+  export PATH="$PATH:$CC_WIN_DIR"
+fi
 # Probing the compiler rather than the variable is the point: a set-but-wrong
 # TMP is exactly as fatal as an unset one, and only a real compile sees it.
 PROBE=$RUN/obj/tmpprobe.c
 printf 'int main(void){return 0;}\n' > "$PROBE"
-if ! "$CC_WIN" -c "$PROBE" -o "$RUN/obj/tmpprobe.o" > "$RUN/logs/tmpprobe.log" 2>&1; then
-  printf 'The windows compiler cannot build a trivial file:\n' >&2
-  sed 's/^/  /' "$RUN/logs/tmpprobe.log" >&2
-  printf 'TMP=%s TEMP=%s TMPDIR=%s - this leg needs a Win32-shaped, writable one.\n' \
-    "${TMP:-unset}" "${TEMP:-unset}" "${TMPDIR:-unset}" >&2
-  printf 'Run it from a login shell (bash -lc, which sets TMP via /etc/profile),\n' >&2
-  printf 'or export TMP="$(cygpath -w /tmp)" first. Do not hand an MSYS-style\n' >&2
-  printf 'path such as /msys64/tmp to a native-Windows compiler - it gets\n' >&2
-  printf 'rewritten against the wrong root.\n' >&2
+"$CC_WIN" -c "$PROBE" -o "$RUN/obj/tmpprobe.o" > "$RUN/logs/tmpprobe.log" 2>&1
+probe_rc=$?
+if ((probe_rc)); then
+  if [[ -s "$RUN/logs/tmpprobe.log" ]]; then
+    printf 'The windows compiler cannot build a trivial file:\n' >&2
+    sed 's/^/  /' "$RUN/logs/tmpprobe.log" >&2
+    printf 'TMP=%s TEMP=%s TMPDIR=%s - this leg needs a Win32-shaped, writable one.\n' \
+      "${TMP:-unset}" "${TEMP:-unset}" "${TMPDIR:-unset}" >&2
+    printf 'Run it from a login shell (bash -lc, which sets TMP via /etc/profile),\n' >&2
+    printf 'or export TMP="$(cygpath -w /tmp)" first. Do not hand an MSYS-style\n' >&2
+    printf 'path such as /msys64/tmp to a native-Windows compiler - it gets\n' >&2
+    printf 'rewritten against the wrong root.\n' >&2
+  else
+    # No diagnostic at all means the compiler never got as far as its own driver.
+    printf '%s exited %s without a word: it could not start cc1.exe.\n' \
+      "$CC_WIN" "$probe_rc" >&2
+    printf 'Its bin directory (%s) holds the DLLs cc1.exe needs, so this is not\n' "$CC_WIN_DIR" >&2
+    printf 'a TMP problem: check that the directory is readable and that the\n' >&2
+    printf 'compiler installation is complete.\n' >&2
+  fi
   exit 2
 fi
 rm -f "$PROBE" "$RUN/obj/tmpprobe.o"
@@ -217,7 +237,14 @@ done
 # opens collide, so a zero-collision run means the probe stopped working, not
 # that the platform got lucky.
 probe_lock() {
-  local who=$1 mode=sst-bigblock n=8 db="db-$who/lockprobe" i
+  # Separate `local` statements, not one: bash expands every word of a single
+  # declaration before assigning any of it, so `local who=$1 db="db-$who/x"` builds
+  # db from the *inherited* who - here the leftover `windows` from the mode loop
+  # above. Both probes then shared one directory, and the posix half reported
+  # refusals on a tree named db-windows (doc/04 N-16).
+  local who=$1
+  local mode=sst-bigblock n=8 i
+  local db="db-$who/lockprobe"
   local -a pids=()
   rm -rf "$db" "lock-$who"; mkdir -p "$db" "lock-$who"
   "bin/$who.exe" create "$db" "$mode" > "logs/$who-lockprobe-seed.log" 2>&1 || {
@@ -244,7 +271,13 @@ probe_lock() {
         printf '  %s\n  %s\n' "$first" "${line#VERIFY }"
         return 1
       fi
-    elif grep -qiE 'LOCK|win32 error 32|Resource deadlock|temporarily unavailable|being used' \
+    # A refusal has to be *the lock*, not any text containing four letters in a
+    # row: the seed database is named lockprobe, the workload is sst-bigblock,
+    # and LevelDB's own corruption messages say "block" - so a bare /LOCK/i
+    # counted crashes and corruption as legitimate contention, which is exactly
+    # the judgement "at least one refusal" exists to make. Match the file the
+    # engine refuses on: "<db>/LOCK" followed by its colon or its errno.
+    elif grep -qiE '/LOCK[: (]|win32 error 32|Resource deadlock|Resource temporarily|temporarily unavailable|being used by another process' \
          "lock-$who/$i.log" 2>/dev/null; then
       refused=$((refused + 1))
     else

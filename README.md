@@ -114,11 +114,13 @@ make test       # 运行全部测试
 产物后缀由平台决定，不是构建选项：Windows 上 `gcc` 总给可执行文件加
 `.exe`，POSIX 上没有这个后缀，所以上面两行是同一目标的两种写法。
 
-环境说明：本仓库在 Windows（Git Bash）下开发，工具链为
-[w64devkit](https://github.com/skeeto/w64devkit)（GCC 16，位于
-`_tools/w64devkit/`，首次构建时自动下载），并在原生 Linux（Debian 12
-glibc）上完整跑过一遍同样的验证腿。构建系统按编译器目标
-（`gcc -dumpmachine`）自动选择 Env 后端：Windows 三元组（含 `mingw`
+环境说明：本仓库在 Windows 下开发，主力工具链是 MSYS2 的三层（msys /
+mingw64 / clang64）；MinGW-w64 那一支也可以用绿色版的
+[w64devkit](https://github.com/skeeto/w64devkit)（GCC 16）代表，它需要**手工**
+下载解压到 `_tools/w64devkit/`——构建过程不会自动下载任何东西，`make` 与全部
+脚本里都没有取包逻辑，只有 `run_cross_backend.sh` 会优先去那个路径找 `CC_WIN`。
+另在原生 Linux（Debian 12 glibc）上完整跑过一遍同样的四条通路验证。构建系统按
+编译器目标（`gcc -dumpmachine`）自动选择 Env 后端：Windows 三元组（含 `mingw`
 或 `windows`）用 `env_win.c`，其余环境（Linux / macOS / MSYS2 msys /
 Cygwin）用 `env_posix.c` + pthread。五条已实测的工具链：
 
@@ -195,7 +197,12 @@ MSYS/MINGW64/CLANG64 之一，或原生 Linux）——`MSYSTEM=` 只是标注，
 里这样前缀不会把 `/clang64/bin` 之类加进 PATH（脚本会在这种情况下直接报
 "clang is not on PATH" 并给出可用的调用形式，而不是先删掉对象树）。Git Bash
 也提供 `/usr/bin`，但里面没有 gcc，所以 `run_cross_backend.sh` 在那里会在
-探测编译器这一步退出。
+探测编译器这一步退出。给这条脚本传绝对路径的 `CC_WIN` 时还有一点要说清：
+`cc1.exe` 的 DLL 依赖住在编译器自己的 bin 目录里，Windows 只按 PATH 找它们，
+所以跨命名空间调用（在 msys 的 shell 里指向 `/mingw64/bin/gcc.exe`）需要那个
+目录在 PATH 上——脚本自己会把它**追加**到末尾（不前插，`make`/`sed`/`find`
+仍由 `/usr/bin` 提供），失败诊断也按"编译器有没有吐出字"分岔，因为一字不吐
+的失败根本不是 `TMP` 的问题（doc/04 N-17）。
 同一条规则跨平台也成立：对象树里留着上一个平台的后端 `.o` 时，换一个
 `OBJDIR` 或先 `make clean`，不要指望 `ar` 清理它。
 

@@ -69,7 +69,9 @@ void ldb_memtable_add(ldb_memtable* m, const ldb_slice* internal_key,
   memcpy(p, internal_key->data, klen);
   p += klen;
   p = ldb_encode_varint32(p, (uint32_t)vlen);
-  memcpy(p, value->data, vlen);
+  if (vlen > 0) {  // an empty value may carry a NULL pointer
+    memcpy(p, value->data, vlen);
+  }
   p += vlen;
   assert((size_t)(p - buf) <= needed);
   ldb_skiplist_insert(m->table, buf);

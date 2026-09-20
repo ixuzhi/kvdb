@@ -8,6 +8,10 @@
 typedef struct repairer {
   ldb_env* env;
   const char* dbname;
+  // Repair builds and reads tables through internal keys, so the user filter
+  // policy must be wrapped (mirrors leveldb's Repairer::ipolicy_); reading a
+  // repaired table with the raw policy would query it by user key and miss.
+  ldb_internal_filter_policy ipolicy;
   ldb_options options;  // sanitized copy
   int owns_info_log;
   int owns_cache;
@@ -77,7 +81,14 @@ static ldb_status scan_table(repairer* r, uint64_t number,
   return s;
 }
 
-static ldb_status convert_log_to_table(repairer* r, uint64_t log_number) {
+// The number of every table built here is pushed onto the caller's list, so
+// phase 3 verifies and registers it like any pre-existing table.  That step is
+// what puts the converted entries' sequence numbers into the new descriptor's
+// last_sequence; registering them here instead would leave them invisible to
+// point lookups once the WAL is gone.
+static ldb_status convert_log_to_table(repairer* r, uint64_t log_number,
+                                       uint64_t** tables, size_t* tables_count,
+                                       size_t* tables_cap) {
   char* fname = ldb_log_file_name(r->dbname, log_number);
   ldb_seq_file* file = NULL;
   ldb_status s = ldb_env_new_sequential_file(r->env, fname, &file);
@@ -114,18 +125,15 @@ static ldb_status convert_log_to_table(repairer* r, uint64_t log_number) {
                         &meta);
     ldb_iterator_destroy(iter);
     if (ldb_ok(s) && meta.file_size > 0) {
-      if (r->tables_count == r->tables_cap) {
-        r->tables_cap = r->tables_cap ? r->tables_cap * 2 : 4;
-        r->tables = (ldb_file_meta**)realloc(
-            r->tables, sizeof(ldb_file_meta*) * r->tables_cap);
-        assert(r->tables);
+      if (*tables_count == *tables_cap) {
+        *tables_cap = *tables_cap ? *tables_cap * 2 : 4;
+        *tables = (uint64_t*)realloc(*tables, sizeof(uint64_t) * *tables_cap);
+        assert(*tables);
       }
-      ldb_file_meta* stored = (ldb_file_meta*)malloc(sizeof(ldb_file_meta));
-      *stored = meta;
-      r->tables[r->tables_count++] = stored;
-    } else {
-      ldb_file_meta_destroy(&meta);
+      (*tables)[(*tables_count)++] = tnumber;
     }
+    // Phase 3 re-derives the meta by scanning the file, so nothing here is kept.
+    ldb_file_meta_destroy(&meta);
   }
   ldb_memtable_unref(mem);
   return s;
@@ -146,6 +154,10 @@ ldb_status ldb_repair_db(const ldb_options* options, const char* dbname) {
   r.options = *options;
   r.options.comparator = &r.adapter;
   r.options.env = env;
+  if (r.options.filter_policy != NULL) {
+    r.options.filter_policy = ldb_init_internal_filter_policy(
+        &r.ipolicy, options->filter_policy);
+  }
   if (r.options.block_cache == NULL) {
     r.options.block_cache = ldb_cache_new_lru((size_t)8 << 20);
     r.owns_cache = 1;
@@ -200,11 +212,13 @@ ldb_status ldb_repair_db(const ldb_options* options, const char* dbname) {
 
     // Phase 2: convert logs to tables.
     for (size_t i = 0; ldb_ok(s) && i < logs_count; i++) {
-      s = convert_log_to_table(&r, logs[i]);
+      s = convert_log_to_table(&r, logs[i], &tables, &tables_count,
+                               &tables_cap);
     }
     r.next_file_number = (r.next_file_number > 2) ? r.next_file_number : 2;
 
-    // Phase 3: verify existing tables and register the good ones.
+    // Phase 3: verify every table (pre-existing plus the ones just converted)
+    // and register the good ones.
     uint64_t max_sequence = 1;
     for (size_t i = 0; ldb_ok(s) && i < tables_count; i++) {
       uint64_t number = tables[i];

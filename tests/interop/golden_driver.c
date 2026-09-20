@@ -178,7 +178,7 @@ static void plan_delete(work* w, int index) {
   w->deleted[w->delete_count++] = index;
 }
 
-static void apply(const work* w, leveldb_options_t* o, int create) {
+static void apply(work* w, leveldb_options_t* o, int create) {
   leveldb_options_set_create_if_missing(o, (unsigned char)create);
   leveldb_options_set_error_if_exists(o, (unsigned char)create);
   leveldb_options_set_compression(o, leveldb_no_compression);
@@ -188,9 +188,10 @@ static void apply(const work* w, leveldb_options_t* o, int create) {
   leveldb_options_set_max_file_size(o, w->cfg.max_file_size);
   leveldb_options_set_paranoid_checks(o, 1);
   if (w->cfg.bloom_bits > 0) {
-    leveldb_filterpolicy_t* f =
-        leveldb_filterpolicy_create_bloom(w->cfg.bloom_bits);
-    leveldb_options_set_filter_policy(o, f);
+    // leveldb_options_destroy does not take ownership of the policy, so keep
+    // the handle for the caller-side destroy in main.
+    w->bloom = leveldb_filterpolicy_create_bloom(w->cfg.bloom_bits);
+    leveldb_options_set_filter_policy(o, w->bloom);
   }
 }
 
@@ -341,5 +342,6 @@ int main(int argc, char** argv) {
     return 2;
   }
   for (int i = 0; i < w.n; i++) free(w.rows[i].val);
+  if (w.bloom != NULL) leveldb_filterpolicy_destroy(w.bloom);
   return 0;
 }

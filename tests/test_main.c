@@ -102,7 +102,6 @@ int ldb_test_run_all(void) {
 int main(int argc, char** argv) {
   if (argc > 1) {
     // Run only matching tests (substring match)
-    extern int ldb_test_run_matching(const char* pattern);
     return ldb_test_run_matching(argv[1]);
   }
   return ldb_test_run_all();

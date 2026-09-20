@@ -19,6 +19,7 @@ typedef struct ldb_test_entry {
 
 int ldb_test_register(const char* name, ldb_test_fn fn);
 int ldb_test_run_all(void);
+int ldb_test_run_matching(const char* pattern);
 
 #define TEST(group, name)                                            \
   static void ldb_test_##group##_##name(void);                       \

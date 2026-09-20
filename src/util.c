@@ -746,6 +746,7 @@ const ldb_filterpolicy* ldb_new_bloom_filter_policy(int bits_per_key) {
   b->base.create_filter = bloom_create_filter;
   b->base.key_may_match = bloom_key_may_match;
   b->base.destroy = bloom_destroy;
+  b->base.impl = NULL;  // the trampolines that read impl are API-side only
   b->bits_per_key = (size_t)bits_per_key;
   b->k = (size_t)(bits_per_key * 0.69);  // 0.69 =~ ln(2)
   if (b->k < 1) b->k = 1;
@@ -777,16 +778,15 @@ static const char* ifp_name(const ldb_filterpolicy* p) {
   return ip->user_policy->name(ip->user_policy);
 }
 
-static ldb_internal_filter_policy ifp_singleton;
-
-const ldb_filterpolicy* ldb_get_internal_filter_policy(
-    const ldb_filterpolicy* user_policy) {
-  ifp_singleton.base.name = ifp_name;
-  ifp_singleton.base.create_filter = ifp_create_filter;
-  ifp_singleton.base.key_may_match = ifp_key_may_match;
-  ifp_singleton.base.destroy = NULL;
-  ifp_singleton.user_policy = user_policy;
-  return &ifp_singleton.base;
+const ldb_filterpolicy* ldb_init_internal_filter_policy(
+    ldb_internal_filter_policy* self, const ldb_filterpolicy* user_policy) {
+  self->base.name = ifp_name;
+  self->base.create_filter = ifp_create_filter;
+  self->base.key_may_match = ifp_key_may_match;
+  self->base.destroy = NULL;
+  self->base.impl = NULL;
+  self->user_policy = user_policy;
+  return &self->base;
 }
 
 // =================================================================== arena

@@ -18,6 +18,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <assert.h>
 #include <string.h>
 
 #include "port.h"
@@ -307,6 +308,9 @@ static inline void ldb_unpack_sequence_and_type(uint64_t tag, uint64_t* seq,
   *type = (int)(tag & 0xff);
 }
 static inline ldb_slice ldb_extract_user_key(const ldb_slice* ikey) {
+  // Matches leveldb's dbformat.h: the caller guarantees an internal key, and
+  // without this the subtraction below silently wraps to ~2^64.
+  assert(ikey->size >= 8);
   return ldb_slice_make(ikey->data, ikey->size - 8);
 }
 int ldb_parse_internal_key(const ldb_slice* ikey,
@@ -508,8 +512,13 @@ typedef struct ldb_internal_filter_policy {
   ldb_filterpolicy base;
   const ldb_filterpolicy* user_policy;
 } ldb_internal_filter_policy;
-const ldb_filterpolicy* ldb_get_internal_filter_policy(
-    const ldb_filterpolicy* user_policy);  // returns static singleton wrapper
+
+// `self` is caller-owned storage (leveldb keeps one instance per DBImpl and
+// per Repairer); the returned pointer stays valid only while `self` lives, and
+// `user_policy` must outlive it.
+const ldb_filterpolicy* ldb_init_internal_filter_policy(
+    ldb_internal_filter_policy* self,
+    const ldb_filterpolicy* user_policy);
 
 // ------------------------------------------------------------------ arena
 typedef struct ldb_arena {
@@ -1215,6 +1224,7 @@ struct ldb_db_impl {
   ldb_env* env;
   ldb_ikc internal_comparator;
   ldb_comparator internal_comparator_adapter;  // ldb_comparator over ikc
+  ldb_internal_filter_policy internal_filter_policy;
   ldb_options options;  // sanitized copy (owns info_log/cache if created)
   int owns_info_log;
   int owns_cache;

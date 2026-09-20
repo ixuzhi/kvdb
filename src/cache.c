@@ -211,7 +211,9 @@ static ldb_cache_handle* lru_insert(ldb_cache* cache, const ldb_slice* key,
   e->hash = hash;
   e->in_cache = 0;
   e->refs = 1;  // for the returned handle.
-  memcpy(e->key_data, key->data, key->size);
+  if (key->size > 0) {  // a zero-length key may carry a NULL pointer
+    memcpy(e->key_data, key->data, key->size);
+  }
 
   if (c->capacity > 0) {
     e->refs++;  // for the cache's reference.

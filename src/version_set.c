@@ -146,7 +146,12 @@ int ldb_version_some_file_overlaps_range(const ldb_version* v, int level,
       heap = (char*)malloc(smallest_user_key->size + 8);
       storage = heap;
     }
-    memcpy(storage, smallest_user_key->data, smallest_user_key->size);
+    /* The caller may pass a zero-length user key whose data is NULL
+     * (leveldb_compact_range(db, NULL, 0, NULL, 0) does exactly that), and
+     * memcpy's nonnull contract is violated even with n == 0. */
+    if (smallest_user_key->size > 0) {
+      memcpy(storage, smallest_user_key->data, smallest_user_key->size);
+    }
     ldb_encode_fixed64(storage + smallest_user_key->size,
                        ldb_pack_sequence_and_type(LDB_K_MAX_SEQUENCE_NUMBER,
                                                   LDB_VALUE_TYPE_FOR_SEEK));
@@ -704,7 +709,9 @@ char* ldb_version_debug_string(const ldb_version* v) {
     }
   }
   char* out = (char*)malloc(r.size + 1);
-  memcpy(out, r.data, r.size);
+  if (r.size > 0) {  // an empty summary buffer still has a NULL data pointer
+    memcpy(out, r.data, r.size);
+  }
   out[r.size] = '\0';
   ldb_buffer_destroy(&r);
   return out;
@@ -1519,7 +1526,7 @@ static void add_boundary_inputs(const ldb_ikc* icmp,
   ldb_buffer_destroy(&largest_key);
 }
 
-void vs_setup_other_inputs(ldb_version_set* vs, ldb_compaction* c) {
+static void vs_setup_other_inputs(ldb_version_set* vs, ldb_compaction* c) {
   const int level = c->level;
   ldb_buffer smallest, largest;
   ldb_buffer_init(&smallest);
@@ -1582,6 +1589,14 @@ void vs_setup_other_inputs(ldb_version_set* vs, ldb_compaction* c) {
                           vs->current_->nfiles[level + 1], &expanded1,
                           &e1_count, &e1_cap);
       if (e1_count == c->inputs_count[1]) {
+        ldb_log(vs->options->info_log,
+                "Expanding@%d %d+%d (%llu+%llu bytes) to %d+%d "
+                "(%llu+%llu bytes)\n",
+                level, (int)c->inputs_count[0], (int)c->inputs_count[1],
+                (unsigned long long)inputs0_size,
+                (unsigned long long)inputs1_size, (int)e0_count, (int)e1_count,
+                (unsigned long long)expanded0_size,
+                (unsigned long long)inputs1_size);
         ldb_buffer_copy(&smallest, &new_start);
         ldb_buffer_copy(&largest, &new_limit);
         free(c->inputs[0]);

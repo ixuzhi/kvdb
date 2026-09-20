@@ -59,11 +59,6 @@ static void cmpw_successor(const ldb_comparator* c, ldb_buffer* key) {
   (void)key;
 }
 
-static const leveldb_comparator_t* unwrap_comparator(
-    const leveldb_comparator_t* lc) {
-  return lc;  // base is embedded; see to_ldb_comparator
-}
-
 static const ldb_comparator* to_ldb_comparator(
     const leveldb_comparator_t* lc) {
   if (lc == NULL) return ldb_bytewise_comparator();

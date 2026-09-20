@@ -61,13 +61,6 @@ static mem_file* fs_find(mem_fs* fs, const char* name) {
   return NULL;
 }
 
-// Find nearest existing parent directory entry (directory = file entry
-// without data that "exists").
-static int fs_dir_exists(mem_fs* fs, const char* dirname) {
-  mem_file* f = fs_find(fs, dirname);
-  return f != NULL;
-}
-
 static mem_file* fs_create(mem_fs* fs, const char* name) {
   mem_file* f = (mem_file*)calloc(1, sizeof(mem_file));
   f->name = strdup(name);
@@ -87,7 +80,24 @@ static void fs_delete_file(mem_fs* fs, mem_file* f) {
   free(f);
 }
 
+// Unlink from the namespace. If handles are still open, keep the object alive
+// until the last handle closes (mirrors POSIX unlink semantics).
+static void fs_unlink(mem_fs* fs, mem_file* f) {
+  mem_file** p = &fs->files;
+  while (*p != NULL && *p != f) p = &(*p)->next;
+  if (*p == f) *p = f->next;
+  if (f->refs > 0) {
+    f->next = fs->graveyard;
+    fs->graveyard = f;
+  } else {
+    free(f->name);
+    free(f->data);
+    free(f);
+  }
+}
+
 static void mem_file_append(mem_file* f, const char* data, size_t n) {
+  if (n == 0) return;  // an empty slice may carry a NULL pointer
   if (f->size + n > f->cap) {
     size_t newcap = f->cap ? f->cap : 256;
     while (newcap < f->size + n) newcap *= 2;
@@ -312,18 +322,7 @@ static ldb_status mem_remove_file(ldb_env* base, const char* fname) {
   }
   // Unlink from the namespace. If handles are still open, keep the object
   // alive until the last handle closes (mirrors POSIX unlink semantics).
-  mem_file** p = &env->fs.files;
-  while (*p != NULL && *p != f) p = &(*p)->next;
-  if (*p == f) *p = f->next;
-  if (f->refs > 0) {
-    // deferred free via a graveyard list
-    f->next = env->fs.graveyard;
-    env->fs.graveyard = f;
-  } else {
-    free(f->name);
-    free(f->data);
-    free(f);
-  }
+  fs_unlink(&env->fs, f);
   ldb_mutex_unlock(&env->fs.mu);
   return ldb_status_ok();
 }
@@ -374,8 +373,16 @@ static ldb_status mem_rename_file(ldb_env* base, const char* src,
     return ldb_status_io_error(src, "file not found");
   }
   mem_file* existing = fs_find(&env->fs, dst);
-  if (existing != NULL && existing->refs == 0) {
-    fs_delete_file(&env->fs, existing);
+  if (existing == f) {
+    // src and dst name the same entry. rename(2) makes this a successful
+    // no-op; deleting "existing" first would free the node we rename.
+    ldb_mutex_unlock(&env->fs.mu);
+    return ldb_status_ok();
+  }
+  if (existing != NULL) {
+    // rename(2) always replaces the target; fs_unlink keeps it alive for the
+    // handles that still reference it, exactly as unlink would.
+    fs_unlink(&env->fs, existing);
   }
   free(f->name);
   f->name = strdup(dst);

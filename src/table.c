@@ -421,7 +421,9 @@ static void ldb_table_read_filter(ldb_table* t, const ldb_slice* filter_handle_v
     return;
   }
   if (block.alloc) {
-    t->filter_data = block.data.data;  // Will need to delete later
+    // ldb_read_block always points data.data at the owning alloc buffer, so
+    // this is an ownership transfer; block_contents_destroy won't free it.
+    t->filter_data = (char*)block.data.data;  // Will need to delete later
     block.alloc = NULL;
   }
   t->filter = (ldb_filter_block_reader*)malloc(sizeof(ldb_filter_block_reader));

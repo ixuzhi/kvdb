@@ -10,12 +10,6 @@ static void cache_test_deleter(const ldb_slice* key, void* value) {
   g_deletes++;
 }
 
-static ldb_slice cache_key(int k) {
-  char buf[32];
-  snprintf(buf, sizeof(buf), "key%d", k);
-  return ldb_slice_str(buf);
-}
-
 // Note: keys passed to insert must outlive the handle; use static storage.
 static char g_key_storage[512][32];
 static void cache_key_into(int k, ldb_slice* out) {
@@ -23,11 +17,17 @@ static void cache_key_into(int k, ldb_slice* out) {
   *out = ldb_slice_str(g_key_storage[k % 512]);
 }
 
+// insert() takes a void* because the cache owns the payload and hands it to the
+// deleter, so a string literal would need a const-cast. The payloads below are
+// read-only in practice, but keep them in writable static storage.
+static char g_v100[] = "v100";
+static char g_v[] = "v";
+
 TEST(cache, HitAndMiss) {
   ldb_cache* c = ldb_cache_new_lru(100);
   ldb_slice key;
   cache_key_into(100, &key);
-  ldb_cache_handle* h = c->insert(c, &key, (void*)"v100", 1, cache_test_deleter);
+  ldb_cache_handle* h = c->insert(c, &key, g_v100, 1, cache_test_deleter);
   CHECK(h != NULL);
   CHECK_STR_EQ("v100", (const char*)c->value(c, h));
   c->release(c, h);
@@ -47,7 +47,7 @@ TEST(cache, EmptyInsert) {
   ldb_cache* c = ldb_cache_new_lru(0);  // caching disabled
   ldb_slice key;
   cache_key_into(100, &key);
-  ldb_cache_handle* h = c->insert(c, &key, (void*)"v100", 1, cache_test_deleter);
+  ldb_cache_handle* h = c->insert(c, &key, g_v100, 1, cache_test_deleter);
   CHECK(h != NULL);
   c->release(c, h);
   CHECK(c->lookup(c, &key) == NULL);
@@ -59,8 +59,7 @@ TEST(cache, Erase) {
   ldb_slice key;
   cache_key_into(100, &key);
   g_deletes = 0;
-  ldb_cache_handle* h =
-      c->insert(c, &key, (void*)"v100", 1, cache_test_deleter);
+  ldb_cache_handle* h = c->insert(c, &key, g_v100, 1, cache_test_deleter);
   c->release(c, h);  // only the cache reference remains
   c->erase(c, &key);  // drops the cache reference and runs the deleter
   CHECK(c->lookup(c, &key) == NULL);
@@ -107,7 +106,7 @@ TEST(cache, ZeroSizeCacheOffered) {
   ldb_cache* c = ldb_cache_new_lru(0);
   ldb_slice key;
   cache_key_into(1, &key);
-  ldb_cache_handle* h = c->insert(c, &key, (void*)"v", 1, cache_test_deleter);
+  ldb_cache_handle* h = c->insert(c, &key, g_v, 1, cache_test_deleter);
   c->release(c, h);
   CHECK(c->lookup(c, &key) == NULL);
   c->destroy(c);
@@ -129,10 +128,10 @@ TEST(cache, TotalCharge) {
   ldb_cache* c = ldb_cache_new_lru(1000);
   ldb_slice key;
   cache_key_into(1, &key);
-  ldb_cache_handle* h1 = c->insert(c, &key, (void*)"v", 100, cache_test_deleter);
+  ldb_cache_handle* h1 = c->insert(c, &key, g_v, 100, cache_test_deleter);
   c->release(c, h1);
   cache_key_into(2, &key);
-  ldb_cache_handle* h2 = c->insert(c, &key, (void*)"v", 200, cache_test_deleter);
+  ldb_cache_handle* h2 = c->insert(c, &key, g_v, 200, cache_test_deleter);
   c->release(c, h2);
   CHECK_EQ(300, (long long)c->total_charge(c));
   c->destroy(c);

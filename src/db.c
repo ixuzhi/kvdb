@@ -45,8 +45,8 @@ ldb_db_impl* ldb_db_impl_new(const ldb_options* raw_options,
   o->comparator = &impl->internal_comparator_adapter;
   o->env = impl->env;
   if (raw_options->filter_policy != NULL) {
-    o->filter_policy =
-        ldb_get_internal_filter_policy(raw_options->filter_policy);
+    o->filter_policy = ldb_init_internal_filter_policy(
+        &impl->internal_filter_policy, raw_options->filter_policy);
   } else {
     o->filter_policy = NULL;
   }
@@ -650,9 +650,6 @@ static void background_call(ldb_db_impl* impl) {
   ldb_cond_signal_all(&impl->background_work_finished_signal);
   ldb_mutex_unlock(&impl->mutex);
 }
-
-static ldb_status do_compaction_work(ldb_db_impl* impl,
-                                     ldb_compaction_state* compact);
 
 static void background_compaction(ldb_db_impl* impl) {
   if (impl->imm != NULL) {

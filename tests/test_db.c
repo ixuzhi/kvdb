@@ -122,10 +122,6 @@ static void dbt_collect(db_tester* t, dbt_iter_collector* c,
   ldb_iterator_destroy(it);
 }
 
-static int dbt_contains(const dbt_iter_collector* c, const char* pair) {
-  return strstr(c->buf, pair) != NULL;
-}
-
 // ------------------------------------------------------------------ tests
 TEST(db, Empty) {
   db_tester t;
@@ -666,4 +662,174 @@ TEST(db, RepairOpenDB) {
   dbt_check_get(&t, "foo", "bar");
   dbt_check_get(&t, "baz", "quux");
   dbt_teardown(&t);
+}
+
+// ------------------------------------------------------------------ repair fidelity
+// A repaired database must be readable by the ordinary path, which means two
+// things the WAL->table conversion has to get right: the filter block has to be
+// keyed the way a normal table keys it (user keys, through the internal filter
+// policy), and the new descriptor's last_sequence has to cover the table that
+// was just converted.  Either mistake leaves the data in the SST but invisible
+// to Get, so the checks below are the assertion.
+TEST(db, RepairWalWithBloomFilter) {
+  db_tester t;
+  dbt_init_options(&t);
+  const ldb_filterpolicy* bloom = ldb_new_bloom_filter_policy(10);
+  t.options.filter_policy = bloom;
+  ldb_test_make_db_path("db_test_repair_bloom", t.path, sizeof(t.path));
+  dbt_reopen(&t);
+  char key[32], val[32];
+  for (int i = 0; i < 200; i++) {
+    snprintf(key, sizeof(key), "key%04d", i);
+    snprintf(val, sizeof(val), "value%04d", i);
+    dbt_put(&t, key, val);
+  }
+  dbt_destroy_open(&t);  // no flush: everything is still in the WAL
+
+  ldb_options ropt;
+  ldb_options_init(&ropt);
+  ropt.env = t.options.env;
+  ropt.filter_policy = bloom;
+  CHECK_STATUS_OK(ldb_repair_db(&ropt, t.path));
+
+  // Drop the WAL, so the converted table is the only copy of the data.  While
+  // the log is around a reopen replays it and papers over both mistakes.
+  ldb_strings files;
+  ldb_strings_init(&files);
+  CHECK_STATUS_OK(ldb_env_get_children(t.options.env, t.path, &files));
+  for (size_t i = 0; i < files.count; i++) {
+    uint64_t number;
+    int type;
+    if (ldb_parse_file_name(files.items[i], &number, &type) &&
+        type == LDB_K_LOG_FILE) {
+      char* full = (char*)malloc(strlen(t.path) + strlen(files.items[i]) + 2);
+      sprintf(full, "%s/%s", t.path, files.items[i]);
+      CHECK_STATUS_OK(ldb_env_remove_file(t.options.env, full));
+      free(full);
+    }
+  }
+  ldb_strings_destroy(&files);
+
+  dbt_reopen(&t);
+  char buf[64];
+  for (int i = 0; i < 200; i++) {
+    snprintf(key, sizeof(key), "key%04d", i);
+    snprintf(val, sizeof(val), "value%04d", i);
+    CHECK_EQ(1, dbt_get(&t, key, buf, sizeof(buf)));
+    CHECK_STR_EQ(val, buf);
+  }
+  dbt_teardown(&t);
+  ((ldb_filterpolicy*)bloom)->destroy((ldb_filterpolicy*)bloom);
+}
+
+// ------------------------------------------------------------------ memenv rename
+static void dbt_env_write(ldb_env* e, const char* path, const char* what) {
+  ldb_writable_file* w = NULL;
+  CHECK_STATUS_OK(ldb_env_new_writable_file(e, path, &w));
+  ldb_slice d = ldb_slice_str(what);
+  CHECK_STATUS_OK(w->m->append(w, &d));
+  CHECK_STATUS_OK(w->m->close(w));
+  w->m->destroy(w);
+}
+
+static void dbt_env_check_read(ldb_env* e, const char* path, const char* expect) {
+  ldb_seq_file* f = NULL;
+  CHECK_STATUS_OK(ldb_env_new_sequential_file(e, path, &f));
+  char buf[64];
+  ldb_slice out;
+  CHECK_STATUS_OK(f->m->read(f, (uint64_t)strlen(expect), &out, buf));
+  CHECK_EQ(strlen(expect), out.size);
+  CHECK(memcmp(buf, expect, out.size) == 0);
+  f->m->destroy(f);
+}
+
+static int dbt_env_child_count(ldb_env* e, const char* dir) {
+  ldb_strings files;
+  ldb_strings_init(&files);
+  CHECK_STATUS_OK(ldb_env_get_children(e, dir, &files));
+  int n = (int)files.count;
+  ldb_strings_destroy(&files);
+  return n;
+}
+
+// rename(2) semantics the POSIX backend gives for free: renaming a file onto
+// itself succeeds and changes nothing, and renaming onto a file that still has
+// open handles unlinks the target without pulling it out from under them.
+TEST(db, MemenvRenameSemantics) {
+  ldb_env* e = ldb_memenv_new();
+  ldb_status s = ldb_env_create_dir(e, "/r");
+  ldb_status_destroy(&s);
+  dbt_env_write(e, "/r/a", "hello");
+  dbt_env_write(e, "/r/b", "world");
+
+  CHECK_STATUS_OK(ldb_env_rename_file(e, "/r/a", "/r/a"));
+  CHECK_EQ(2, dbt_env_child_count(e, "/r"));
+  dbt_env_check_read(e, "/r/a", "hello");
+
+  ldb_seq_file* open_b = NULL;
+  CHECK_STATUS_OK(ldb_env_new_sequential_file(e, "/r/b", &open_b));
+  CHECK_STATUS_OK(ldb_env_rename_file(e, "/r/a", "/r/b"));
+  CHECK_EQ(1, dbt_env_child_count(e, "/r"));
+  dbt_env_check_read(e, "/r/b", "hello");
+  open_b->m->destroy(open_b);
+  CHECK_EQ(1, dbt_env_child_count(e, "/r"));
+  dbt_env_check_read(e, "/r/b", "hello");
+  ldb_memenv_destroy(e);
+}
+
+// ------------------------------------------------------------------ empty slices
+static void dbt_noop_deleter(const ldb_slice* key, void* value) {
+  (void)key;
+  (void)value;
+}
+
+// {NULL,0} slices and zero-length values reach memcpy in the memtable, the
+// block cache and the range-overlap binary search.  memcpy's nonnull contract
+// is violated even when the length is zero, so only a sanitizer build turns
+// this into a failure; the value checks make sure the data really round-trips.
+TEST(db, EmptySlicesWithFilesInHigherLevels) {
+  db_tester t;
+  dbt_init_options(&t);
+  ldb_test_make_db_path("db_test_empty_slices", t.path, sizeof(t.path));
+  dbt_reopen(&t);
+
+  char key[32], val[32];
+  for (int i = 0; i < 500; i++) {
+    snprintf(key, sizeof(key), "key%04d", i);
+    snprintf(val, sizeof(val), "value%04d", i);
+    dbt_put(&t, key, val);
+  }
+  ldb_write_options wo;
+  ldb_write_options_init(&wo);
+  ldb_write_batch b;
+  ldb_write_batch_init(&b);
+  ldb_slice empty = {NULL, 0};
+  ldb_write_batch_put(&b, &empty, &empty);
+  ldb_write_batch_delete(&b, &empty);
+  ldb_write_batch_put(&b, &empty, &empty);
+  CHECK_STATUS_OK(ldb_db_impl_write(t.db, &wo, &b));
+  ldb_write_batch_destroy(&b);
+
+  // Put files in level 1 so the binary-search branch of the overlap test runs.
+  ldb_db_impl_test_compact_range(t.db, 0, NULL, NULL);
+  ldb_db_impl_compact_range(t.db, &empty, &empty);
+
+  char buf[64];
+  for (int i = 0; i < 500; i++) {
+    snprintf(key, sizeof(key), "key%04d", i);
+    snprintf(val, sizeof(val), "value%04d", i);
+    CHECK_EQ(1, dbt_get(&t, key, buf, sizeof(buf)));
+    CHECK_STR_EQ(val, buf);
+  }
+  dbt_teardown(&t);
+
+  ldb_cache* c = ldb_cache_new_lru(1024);
+  char v[] = "v";  // insert() takes void*, so a literal would need a const-cast
+  ldb_cache_handle* h = c->insert(c, &empty, v, 1, dbt_noop_deleter);
+  CHECK(h != NULL);
+  c->release(c, h);
+  ldb_cache_handle* h2 = c->lookup(c, &empty);
+  CHECK(h2 != NULL);
+  c->release(c, h2);
+  c->destroy(c);
 }

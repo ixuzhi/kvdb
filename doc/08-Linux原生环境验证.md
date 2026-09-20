@@ -3,6 +3,8 @@
 本文档记 2026-09-19 在**真正的原生 Linux（glibc）**上把 kvdb 的全部验证腿跑一遍的
 过程：环境矩阵、为跑通这些腿新装的软件与卸载方法、四条腿的逐条结果、本轮
 发现并修复的缺陷（doc/06 P0-10）、踩到的两个工具链坑、以及"哪些仍然没覆盖"。
+**次日（2026-09-20）的第二轮另记 §11**：打开 LeakSanitizer、闭合 §9 的 T1（引擎侧与
+测试侧共五族泄漏被修掉），并把四条腿在最新代码上全部复跑一遍。
 
 背景：在此之前所有实测证据都来自 Windows 系的三条工具链（MSYS2 `env_posix`、
 MinGW64 `env_win` 静态、clang64 `env_win` 动态），`doc/06` 的 P2-1 因此一直挂着
@@ -21,6 +23,10 @@ MinGW64 `env_win` 静态、clang64 `env_win` 动态），`doc/06` 的 P2-1 因�
 | L3 ASan + UBSan | `bash scripts/run_sanitizers.sh`（gcc 版） | **rc=0**：127 例 + 官方 c_test 16 阶段 + `golden_driver` 10 负载 create/verify，**零报告** | `build/san-runs/interop-20260919-051449/`，脚本按 §6 重构后又跑一遍：`interop-20260919-054158/` |
 | 本轮修复 | `src/version_set.c:1446` | P0-10：`get_range2` 把 NULL 传给 `memcpy`，UBSan 判 UB | 见 §5 |
 | snappy 探路（P2-8） | /tmp 内一次性实验，未入库 | 压缩块**不逐字节相同**，但**双向可解**、摘要一致 | 见 §7 |
+
+> **本节记的是 2026-09-19 的首轮。** 次日在同一台机器上做了第二轮：打开
+> LeakSanitizer（§9 的 T1 由此关闭）、把四条腿在最新代码上全部复跑一遍。
+> 逐条结果、泄漏 breakdown 与负向对照见 **§11**。
 
 一句话：**格式兼容、互操作、内存安全三条主张在原生 glibc 上全部复现成立**，
 且这轮新增的编译器（gcc 12 + glibc 头文件）确实比 clang64 多看见一处真实 UB。
@@ -122,6 +128,16 @@ directory`，L2 更是直接 `rc=127`），容易被误读成引擎问题。现�
 `build_official.sh` 与 `run_interop.sh` 各自在动工前 `[[ -x "$CXX" ]]` 显式检查并给出
 安装命令，两条都以 rc=2 干净退出。`build/interop/official/` 里的缓存归档保持原样
 （卸了 `g++` 它也不可用，因为官方侧驱动仍要用 `g++` 链接）。
+
+### 2026-09-20 第二轮开工前的实际包状态
+
+和上表**不一样**：`g++` / `g++-12` / `libstdc++-12-dev` 三个已在位（用户在这两轮之间
+恢复了环境，`dpkg -l` 实测 `ii`），所以 L1/L2 不需要重装就能跑；`lcov` 及其两个 perl
+依赖、`libsnappy-dev` 四个仍缺，于是 §9 的 T3（行/分支覆盖率）与 P2-8 的 snappy 正式
+比对这一轮依旧做不了——`libsnappy1v5` 运行库系统里有，缺的是头文件，`run_interop.sh`
+的独立探测因此打印 `SKIP Snappy interop: independent MSYS2 Snappy dependency probe
+failed`（`build_linux/logs/R3-L2-interop.out:18`，同一条腿的 `Config:` 行是
+`SNAPPY=0`）。**第二轮没有新装任何包**，故上面那份卸载清单仍然完整有效。
 
 ---
 
@@ -382,14 +398,16 @@ gcc 15.2 与 Linux gcc 12 报出**完全相同的 6 处**，MINGW64 gcc 16.1 与
   权威副本永远是 `$RUN/run.log`。
 
 小结：doc/06 P2-1 的"原生 Linux"这一半已闭合，Windows 三条通路在 P0-10 之后仍全绿。
-剩下 macOS（T6）与 §9 的 T1–T8。
+剩下 macOS（T6）与 §9 的 T2–T8（T1 已于 2026-09-20 关闭，见 §11）。
 
 ---
 
 ## 9. 仍**未**覆盖（TODO，按决定本轮延后）
 
 已确认延后的四项 Linux 独有增量是 T1–T4；T5–T8 是随之记下的既有遗留。
-**注意 T1–T5 里凡是提到"包已就位"的，本轮结束时都已卸掉**（§3）。重装要两个
+**T1 已于次日（2026-09-20）关闭，见 §11；其余七项状态未变。**
+**注意 T1–T5 里凡是提到"包已就位"的，首轮结束时都已卸掉**（§3），
+次日第二轮开工前的实际包状态另见 §3 末小节。重装要两个
 开关一起给，否则 apt 会去拉 `lcov` 的 recommends（`libgd-perl` 等，缓存里没有）而报
 `Unable to fetch some archives`：
 
@@ -399,7 +417,7 @@ apt-get install --no-install-recommends --no-download -y g++ libsnappy-dev lcov 
 
 | # | 项 | 现状 | 怎么补 |
 |---|---|---|---|
-| T1 | **LeakSanitizer 泄漏维度**（doc/06 P2-9 的唯一残留） | LSan 在本机实测可用（`libasan.so.8`，负向探针能报 8 字节泄漏），开关已进脚本 | `SAN_DETECT_LEAKS=1 bash scripts/run_sanitizers.sh`；先给 `-O0/volatile` 的假泄漏做负向对照（`-O1` 下死代码消除会把探针本身优化掉，本轮踩过） |
+| T1 | ~~**LeakSanitizer 泄漏维度**~~（doc/06 P2-9 的唯一残留） | **已关闭（2026-09-20）**：脚本在 `*linux*` 上改为默认开启 LSan，首跑报 929,842 字节 / 201 个分配，逼出五族缺陷并全部修掉，复跑 `rc=0` 零报告——逐条见 §11 与 doc/04 E-16/E-17/E-18、T-12/T-13 | 保留原配方（也是本轮做的事）：`SAN_DETECT_LEAKS=1 bash scripts/run_sanitizers.sh`（现在默认就是开的，`SAN_DETECT_LEAKS=0` 才是关）；先给 `-O0/volatile` 的假泄漏做负向对照（`-O1` 下死代码消除会把探针本身优化掉，本轮踩过） |
 | T2 | **TSan + 并发压测**（P2-2） | gcc 的 `libtsan` 就位（`/usr/lib/gcc/.../12/libtsan.so`），一条探针能建能跑 | 需另写 `SAN="-fsanitize=thread"` 的一次构建（TSan 与 ASan 不能混）+ 移植官方 `db_test` 的 `MultiThreadTest`（MemTableTrash 场景）并加时长 |
 | T3 | **行/分支覆盖率报告**（"覆盖完全"的量化口径） | `lcov` 装过又卸了（可离线装回，见本节开头）；`gcov` 随 gcc 还在，但**本轮从未做过 `--coverage` 构建**，全仓库 0 个 `.gcno/.gcda`，没有现成数据 | `make clean && make OBJDIR=build_cov BINDIR=build_cov SANFLAGS="--coverage"`（**必须走 `SANFLAGS`**：命令行给 `CFLAGS=` 会吞掉 `+=` 的 `-D_GNU_SOURCE`/`-lpthread`，正是 §6 坑①），再 `lcov --capture --directory build_cov --output-file cov.info` + `genhtml`，未命中行逐条回填 doc/05。**配方前半段已实测**（在 `/tmp` 里做的一次性构建，探针产物随后删掉）：`SANFLAGS="--coverage"` 的编译行里 `-D_GNU_SOURCE` 与 `--coverage` 并存、25 个 `.gcno`、跑完 127/0 并落下 36 个 `.gcda`；后半段（`--capture`/`genhtml`）因 `lcov` 已卸未跑，重装后再验。 |
 | T4 | **多进程锁语义专项**（P2-6） | Linux 的 `fcntl` 区域锁与 Windows 独占打开语义不同，只有原生 POSIX 能测真值 | 两进程同时 `leveldb_open` 同一目录，断言第二个拿到 `IO error`；与官方 `env_posix` 行为对照 |
@@ -414,15 +432,90 @@ apt-get install --no-install-recommends --no-download -y g++ libsnappy-dev lcov 
 
 ```bash
 cd /root/work/kvdb
-apt-get install --no-install-recommends -y g++   # L1/L2 要现编 C++ 参考库；本轮结束后已卸
+apt-get install --no-install-recommends -y g++   # L1/L2 要现编 C++ 参考库；首轮装后卸过，第二轮起本机已在位
 git submodule update --init leveldb                 # 固定 pin，脚本会校验提交与未改动
 export TMPDIR=$PWD/build_linux/tmp; mkdir -p "$TMPDIR"
 
 make -j4 && ./build/kvdb_tests                     # L0
 bash scripts/run_golden.sh                         # L1（需 g++）
 RUN_C_TEST=1 bash scripts/run_interop.sh           # L2（需 g++）
-bash scripts/run_sanitizers.sh                     # L3（Linux 上自动选 gcc）
+bash scripts/run_sanitizers.sh                     # L3（Linux 上自动选 gcc，且默认开 LSan ⇒ 见 §11）
 ```
 
 留档目录（`.gitignore` 已覆盖 `build/`，不会入库）：`build_linux/logs/`、
 `build/interop/golden-*`、`build/interop/run-*`、`build/san-runs/*`。
+
+---
+
+## 11. 2026-09-20 第二轮：泄漏维度（T1）闭环 + 四条腿复跑
+
+首轮在这台机器上把 LSan 的**能力**验到位、却把**跑一遍**记成了 T1。本轮补上：
+先让脚本默认开这一维，再量首跑结果，修掉报出来的每一族，最后把四条腿在最新代码上重跑。
+
+### 11.1 先改装置：`run_sanitizers.sh` 在 Linux 上默认开 LSan
+
+判据按宿主三元组分岔（`*linux*` ⇒ 默认开，其余 ⇒ 不支持），并把结果打成一行写进 `run.log`：
+
+```
+leak check: ON (SAN_DETECT_LEAKS=0 to disable), probe says: 0 tests, 0 failed
+```
+
+`SAN_DETECT_LEAKS=0` 是唯一的关闭方式。**这行文本本身就是判据**：改动前它打印的是
+"SUPPORTED here (SAN_DETECT_LEAKS=1 to enable)"，两版对照能立刻看出这次到底有没有在查泄漏——
+一条默认关着的检查，绿色和没跑过是无法区分的。
+
+### 11.2 首跑报出的全部泄漏（`SAN_DETECT_LEAKS=1`，未修任何代码）
+
+`build_linux/logs/R2-L3-leaks.out` → `build/san-runs/interop-20260920-000803/`，`rc=1`：
+
+| 消费者 | 报出的量 |
+|---|---|
+| 127 例套件 | `929842 byte(s) leaked in 201 allocation(s)` |
+| 官方 `c_test` | `33328 byte(s) / 10 allocation(s)` |
+| `golden_driver` 每个负载的 create | `126–135 B / 2 allocation(s)` |
+
+套件那一百来个分配按栈聚出来恰好五族（下表 7 行，E-16 与 T-13 各占两行），
+逐族对上的字节数之和 = 929,842、对象数之和 = 201（无剩余）：
+
+| 族 | 字节 / 对象 | 栈顶（分配点 ← 调用者） | 归属 |
+|---|---|---|---|
+| log reader 的读缓冲 | 917,504 / 28（**Indirect**） | `ldb_buffer_reserve util.c:28 ← ldb_buffer_resize ← ldb_log_reader_new log.c:129 ← recover_log_file db.c:436` | **E-16** |
+| log reader 结构体 | 2,688 / 28（Direct） | `ldb_log_reader_new log.c:118 ← recover_log_file db.c:436` | **E-16** |
+| 开库时丢弃的 env 状态 | 5,760 / 69（Direct） | `ldb_status_new util.c:106 ← … ← ldb_db_impl_new db.c:63`（memenv 46 + posix 23） | **E-17** |
+| `db_new_db` 的 version edit | 1,568 / 49 | `… ← ldb_buffer_append_str ← ldb_version_edit_set_comparator version_edit.c:72 ← db_new_db db.c:146` | **E-18** |
+| 脚手架丢弃的状态 | 2,242 / 22 | `ldb_status_new ← ldb_env_get_children / ldb_env_delete_dir ← ldb_test_destroy_dir test_main.c:60、:69` | **T-12** |
+| 表用例的文件句柄 + 一个 lookup key | 64 / 4 与 16 / 1 | `mem_new_random_access_file env_mem.c:243 ← tt_open test_table.c:67`；`ldb_lookup_key_init util.c:646` | **T-13** |
+
+三件值得记下来的事：
+
+- **98.7% 的字节是"间接泄漏"**——只能通过一个已经泄漏的对象到达，所以 LSan 把 28 个
+  32 KB 读缓冲（`LDB_LOG_BLOCK_SIZE` = 32,768，`kvdb.h:668`）记在 `ldb_buffer_reserve` 头上，
+  而那 96 字节的 reader 结构体才是真正该修的地方。只看总量会去查错的那一层。
+- **E-17 那一族只在错误路径上有 `msg` 可泄**（成功状态不持有堆内存），所以本轮修掉的
+  29 处里只有 `db.c:63` 那几处被实测报出，其余 20 多处是机械扫描找出的**预防性**修复。
+  doc/04 E-17 把这两类分开记了。
+- 五族全部落在同一句话里：**官方 C++ 靠析构函数自动归还，C 的值类型必须自己说什么时候还**。
+  E-16/E-18 是漏了 `*_destroy`，E-17/T-12 是丢弃了一个值类型——后者还在代码里新加了
+  `ldb_status_release()`，好让"故意忽略这个错误"在源码里看得见。
+
+### 11.3 修完之后：`rc=0` 且默认开着跑
+
+| 腿 | 命令 | 结果 | 留档 |
+|---|---|---|---|
+| L3（显式开 LSan） | `SAN_DETECT_LEAKS=1 bash scripts/run_sanitizers.sh` | `rc=0`，127 例 + 官方 `c_test` 16 阶段 + 10 负载 create/verify **零泄漏报告** | `build_linux/logs/R3-L3-leaks.out` → `build/san-runs/interop-20260920-002712/` |
+| L3（脚本改为默认开之后） | `bash scripts/run_sanitizers.sh` | `rc=0`，同上 | `R3-L3-default.out` → `-003009/` |
+| L3（读真实官方目录） | `OFFICIAL_DBS=build/interop/golden-20260920-003147 bash scripts/run_sanitizers.sh` | `rc=0`；`foreign databases: …/golden-20260920-003147` | `R3-L3-official.out` → `-003525/` |
+| 负向对照 | 把 `recover_log_file` 里补的那行换成一次故意的 `ldb_log_reader_new(...)` | `rc=1`、`1840384 byte(s) / 112 allocation(s)`，`c_test` 与 `verify sst` 各 `65728 B / 4` | `R3-L3-negctl.out` → `-002934/` |
+| L0 | `make -j4 && ./build/kvdb_tests` | `127 tests, 0 failed`，6 条告警与首轮一字不差 | `R3-L0-build.log`、`R3-L0-unit.log`、`R3-L0-defaultbuild.log` |
+| L1 | `bash scripts/run_golden.sh` | `rc=0`：109 PASS / 33 SAME / 1 DIFF（`levels` 布局，P2-7 允许）/ 0 FAIL；**`results.tsv` 145 行与修复前 `cmp` 为空** | `R3-L1-golden.out` → `build/interop/golden-20260920-003147/` |
+| L2 | `RUN_C_TEST=1 bash scripts/run_interop.sh` | `rc=0`：65 阶段全 rc=0；未修改的官方 `c_test` `rc=0` | `R3-L2-interop.out` → `build/interop/run-xEPUzNri/` |
+
+**"字节中性"是这轮最要紧的一条**：五族修复动了 `db.c`/`table.c`/`repair.c`/`version_set.c`/
+`dbformat.c`/`c_api.c` 的控制流（其中 E-17 六处是 `if (ldb_ok(<内联调用>))` 的等价改写），
+而 L1 的逐条判定与逐文件摘要和修复前完全相同，L3 的 `sst-bigblock` 摘要也仍是
+`714b697132214d29`——归还内存不该改变磁盘，这一条被独立量过而不是被假设。
+
+一处操作细节值得记：L1 第一次以 `rc=2` 退出，报 `Missing …/build/libleveldb.a`。
+根因是本轮 L0 一直在 `OBJDIR=build_linux` 里构建，而跨引擎腿默认吃 `build/`。
+不是缺陷、也不是守卫失灵——守卫正是靠"归档不存在"才没让它链上别的东西。
+`make clean && make -j4` 回到默认 `build/` 后 L1/L2 立即通过。

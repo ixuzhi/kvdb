@@ -130,7 +130,7 @@ Cygwin）用 `env_posix.c` + pthread。五条已实测的工具链：
 | 独立 Cygwin gcc 14.4 | `x86_64-pc-cygwin` | `env_posix.c` | 127/127 + 黄金比对 + 官方 `c_test` |
 | MinGW64 gcc 16（`MSYSTEM=MINGW64`，含 w64devkit） | `x86_64-w64-mingw32` | `env_win.c`（静态） | 127/127 + 官方 `c_test` 通过 |
 | MSYS2 clang 22（`MSYSTEM=CLANG64`） | `x86_64-w64-windows-gnu` | `env_win.c`（动态） | 127/127，ASan+UBSan 零报告 |
-| 原生 Linux gcc 12.2（Debian glibc） | `x86_64-linux-gnu` | `env_posix.c` | 127/127 + 黄金比对 + 官方 `c_test` + ASan/UBSan 零报告 |
+| 原生 Linux gcc 12.2（Debian glibc） | `x86_64-linux-gnu` | `env_posix.c` | 127/127 + 黄金比对 + 官方 `c_test` + ASan/UBSan **与 LSan** 零报告（Linux 上泄漏检查默认开） |
 
 前两行是本轮新测的，写在 `doc/09-Windows工具链矩阵与Cygwin验证.md`。这里
 有一个容易踩空的地方：MSYS2 的 msys 层是 Cygwin 的 fork，但它的 gcc 报的
@@ -278,7 +278,11 @@ msys 与 Cygwin 在磁盘上看得见彼此、在运行时却互不可见，串�
   "零报告"。Windows 那一轮暴露并修复了跳表节点未对齐与 info-log 句柄
   泄漏两个缺陷，Linux 那一轮又逼出了 `memcpy(NULL, …, 0)`（P0-10），
   逐文件说明见 `doc/07-ASan与UBSan内存安全验证.md` 与
-  `doc/08-Linux原生环境验证.md`。
+  `doc/08-Linux原生环境验证.md`。Linux 侧还多一维：**LeakSanitizer 默认开启**
+  （`SAN_DETECT_LEAKS=0` 才关；Windows 的 ASan 不带 LSan，那边无此项）。
+  打开它的首跑报出 `929842 byte(s) leaked in 201 allocation(s)`，五族泄漏
+  全部修掉后该腿 `rc=0` 且零泄漏，负向对照再注入一次泄漏仍能报出来
+  （`doc/08 §11`）。
 - `tests/test_format_extra.c`：把 varint/fixed/长度前缀、内部键 trailer、
   VersionEdit 标签、块句柄与 footer 的官方编码写成硬编码字节黄金值，
   不需要真实 leveldb 也能守住格式契约（并覆盖截断/损坏语料）。
@@ -313,10 +317,13 @@ msys 与 Cygwin 在磁盘上看得见彼此、在运行时却互不可见，串�
   **压缩器不位相同（kvdb 的简化编码器产物长约 3.4%），但块级互操作
   成立**——两个引擎都能解对方的压缩块。因为这条模式没进正式比对集，
   问题仍开着。
-- 泄漏维度未验证：Windows 版 ASan 不带 LeakSanitizer，Linux 上带
-  （`libasan.so.8`，负向探针实测能报），脚本已加 `SAN_DETECT_LEAKS=1`
-  开关随时可跑；这一轮按"先记录、暂不执行"处理
-  （doc/06 P2-9，doc/08 §9 T1）。
+- 泄漏维度**已在原生 Linux 上验证并闭环**（2026-09-20）：脚本默认开
+  LeakSanitizer（`SAN_DETECT_LEAKS=0` 关闭），打开它的首跑报出 929,842 字节 /
+  201 个分配，五族（引擎侧 E-16/E-17/E-18 + 测试侧 T-12/T-13）修完该腿 `rc=0`
+  且零泄漏，负向对照证明这条检查确实在起作用（doc/06 P2-9，doc/08 §11）。
+  **Windows 侧仍不可测**：clang64 的 ASan 不带 LSan，
+  `ASAN_OPTIONS=detect_leaks=1` 会在 `main` 之前退出并打印
+  "detect_leaks is not supported on this platform"。
 - 并发维度只有 2 写 2 读 120 轮屏障用例，未跑 ThreadSanitizer。多进程锁
   竞争这一项本轮已闭环：`run_cross_backend.sh` 用 8 个并发 `verify` 进程
   压同一批目录，`env_win.c`（`CreateFileA` 独占共享模式，回 `ERROR_SHARING_VIOLATION`）

@@ -154,6 +154,7 @@ Windows 上 `DestroyDB` 之后同路径重开报 win32 error 32（共享冲突�
 | `golden_driver` 10 种负载 create + verify | 全部 rc=0；verify 读官方引擎目录，摘要与跨引擎黄金比对留档逐字符相同（`wal` 与 `sst` 内容一致，故 10 负载对应 9 个不同摘要） |
 | 另外两条工具链（不带 sanitizer） | MSYS `env_posix` 127-127；MINGW64 `env_win` 静态 127-127 且官方 `c_test` PASS |
 | 改动后重跑跨引擎黄金比对 | rc=0，严格模式仍 9/9 负载、33 个文件逐字节相同、109 项 PASS |
+| 2026-09-20 原生 Linux（gcc，**LSan 默认开启**） | `127 tests, 0 failed` + 官方 `c_test` 16 阶段 + 10 负载 create/verify 全 `rc=0`、**含零泄漏报告**；打开这条检查的首跑报 `929,842 byte(s) / 201 allocation(s)`，逼出的五族缺陷见 §6 与 doc/08 §11 |
 
 留档：`build/san-runs/interop-<时间戳>/{run.log,build.log,unit.log,c_test.log,<mode>.log}`。
 
@@ -161,10 +162,14 @@ Windows 上 `DestroyDB` 之后同路径重开报 win32 error 32（共享冲突�
 
 - **泄漏**：Windows 版 ASan 不带 LeakSanitizer，`ASAN_OPTIONS=detect_leaks=1`
   会在 `main` 之前直接退出并打印 "detect_leaks is not supported on this
-  platform"（脚本把这一行原样记进日志）。P0-9 这类"句柄/缓冲未归还"目前只能
-  靠 API 行为反证。**2026-09-19 原生 Linux 复跑已把这条的"做不到"改成"能做但暂未做"**：
-  gcc 的 `libasan.so.8` 带 LSan，负向探针能报出 8 字节泄漏，脚本另加
-  `SAN_DETECT_LEAKS=1` 开关；真正跑一遍并把结论入账记为 doc/08 §9 的 T1。
+  platform"（脚本把这一行原样记进日志）。**2026-09-19 原生 Linux 复跑把这条的
+  "做不到"改成"能做但暂未做"**（gcc 的 `libasan.so.8` 带 LSan，脚本加
+  `SAN_DETECT_LEAKS=1` 开关，跑一遍记为 doc/08 §9 的 T1）；**2026-09-20 该维度
+  已在 Linux 上真正闭环**：脚本在 `*linux*` 宿主上改为**默认开启**（关闭方式是
+  `SAN_DETECT_LEAKS=0`），首跑报 `929,842 byte(s) leaked in 201 allocation(s)`，
+  逼出五族缺陷（引擎侧 E-16/E-17/E-18、测试侧 T-12/T-13，详录 doc/04、doc/08 §11），
+  修完这条腿 `rc=0` 且零泄漏报告。也就是说 P0-9 那类"句柄/缓冲未归还"从此不再只
+  能靠 API 行为反证——**但仅限 Linux**：Windows 侧的这条限制原文照旧成立。
   （做该负向对照时注意 `-O1` 会把死掉的 `malloc`/写整条消除，探针要 `-O0` +
   `volatile`，否则得到的是"没报"的假象——本轮先踩了这个坑。）
 - **`-fno-sanitize-recover=all` 会掩盖后续结果**：首次遇到 UBSan 报告就终止，

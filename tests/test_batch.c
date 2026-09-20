@@ -105,6 +105,7 @@ TEST(write_batch, InsertIntoMemTable) {
     CHECK_EQ(0, ldb_ok(s));  // deleted
     ldb_status_destroy(&s);
     s = ldb_status_ok();
+    ldb_lookup_key_destroy(&lk);
   }
   ldb_buffer_destroy(&value);
   ldb_memtable_unref(mem);

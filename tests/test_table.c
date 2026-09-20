@@ -7,6 +7,9 @@ typedef struct table_tester {
   ldb_options options;
   char fname[128];
   ldb_table* table;
+  // Table::Open does not take ownership of the file it reads, so the tester
+  // has to keep it and destroy it itself (as the engine's table cache does).
+  ldb_rand_file* file;
   uint64_t fsize;
 } table_tester;
 
@@ -23,11 +26,13 @@ static void tt_init(table_tester* t, int use_filter) {
   }
   snprintf(t->fname, sizeof(t->fname), "/memenv/table_test.ldb");
   t->table = NULL;
+  t->file = NULL;
   t->fsize = 0;
 }
 
 static void tt_destroy(table_tester* t) {
   if (t->table) ldb_table_destroy(t->table);
+  if (t->file) t->file->m->destroy(t->file);
   if (t->options.filter_policy && t->options.filter_policy->destroy) {
     t->options.filter_policy->destroy(
         (ldb_filterpolicy*)t->options.filter_policy);
@@ -69,6 +74,8 @@ static ldb_status tt_open(table_tester* t) {
   s = ldb_table_open(&t->options, file, t->fsize, &t->table);
   if (!ldb_ok(s)) {
     file->m->destroy(file);
+  } else {
+    t->file = file;
   }
   return s;
 }

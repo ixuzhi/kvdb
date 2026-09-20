@@ -41,12 +41,12 @@ void ldb_test_fail(const char* file, int line, const char* fmt, ...) {
 void ldb_test_make_db_path(const char* name, char* out, size_t out_size) {
   ldb_buffer path;
   ldb_buffer_init(&path);
-  ldb_env_get_test_directory(ldb_env_default(), &path);
+  ldb_status_release(ldb_env_get_test_directory(ldb_env_default(), &path));
   // Ensure the test root exists (needed for the real filesystem env).
   char* root = (char*)malloc(path.size + 1);
   memcpy(root, path.data ? path.data : "", path.size);
   root[path.size] = '\0';
-  ldb_env_create_dir(ldb_env_default(), root);
+  ldb_status_release(ldb_env_create_dir(ldb_env_default(), root));
   free(root);
   snprintf(out, out_size, "%.*s/%s", (int)path.size,
            path.data ? path.data : "", name);
@@ -57,16 +57,18 @@ void ldb_test_destroy_dir(const char* path) {
   ldb_env* env = ldb_env_default();
   ldb_strings files;
   ldb_strings_init(&files);
-  if (ldb_ok(ldb_env_get_children(env, path, &files))) {
+  ldb_status s = ldb_env_get_children(env, path, &files);
+  if (ldb_ok(s)) {
     for (size_t i = 0; i < files.count; i++) {
       char* full = (char*)malloc(strlen(path) + strlen(files.items[i]) + 2);
       sprintf(full, "%s/%s", path, files.items[i]);
-      ldb_env_remove_file(env, full);
+      ldb_status_release(ldb_env_remove_file(env, full));
       free(full);
     }
   }
+  ldb_status_destroy(&s);
   ldb_strings_destroy(&files);
-  ldb_env_delete_dir(env, path);
+  ldb_status_release(ldb_env_delete_dir(env, path));
 }
 
 static int run_one(ldb_test_entry* e) {

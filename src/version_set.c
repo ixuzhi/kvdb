@@ -1133,7 +1133,7 @@ ldb_status ldb_version_set_log_and_apply(ldb_version_set* vs,
       vs->descriptor_log = NULL;
       vs->descriptor_file->m->destroy(vs->descriptor_file);
       vs->descriptor_file = NULL;
-      ldb_env_remove_file(vs->env, new_manifest_file);
+      ldb_status_release(ldb_env_remove_file(vs->env, new_manifest_file));
     }
   }
 

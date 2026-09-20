@@ -57,15 +57,18 @@ ldb_db_impl* ldb_db_impl_new(const ldb_options* raw_options,
   clip_to_range_size(&o->block_size, (size_t)1 << 10, (size_t)4 << 20);
   if (o->info_log == NULL) {
     // Open a log file in the same directory as the db
-    ldb_env_create_dir(impl->env, dbname);  // In case it does not exist
+    // (the directory may not exist yet)
+    ldb_status_release(ldb_env_create_dir(impl->env, dbname));
     char* old_log = ldb_old_info_log_file_name(dbname);
     char* log_name = ldb_info_log_file_name(dbname);
-    ldb_env_rename_file(impl->env, log_name, old_log);
+    ldb_status_release(ldb_env_rename_file(impl->env, log_name, old_log));
     ldb_logger* logger = NULL;
-    if (ldb_ok(ldb_env_new_logger(impl->env, log_name, &logger))) {
+    ldb_status ls = ldb_env_new_logger(impl->env, log_name, &logger);
+    if (ldb_ok(ls)) {
       o->info_log = logger;
       impl->owns_info_log = 1;
     }
+    ldb_status_destroy(&ls);
     free(old_log);
     free(log_name);
   }
@@ -113,7 +116,7 @@ void ldb_db_impl_destroy(ldb_db_impl* impl) {
   ldb_mutex_unlock(&impl->mutex);
 
   if (impl->db_lock != NULL) {
-    ldb_env_unlock_file(impl->env, impl->db_lock);
+    ldb_status_release(ldb_env_unlock_file(impl->env, impl->db_lock));
   }
 
   ldb_version_set_destroy(&impl->versions);
@@ -155,6 +158,7 @@ static ldb_status db_new_db(ldb_db_impl* impl) {
   ldb_status s = ldb_env_new_writable_file(impl->env, manifest, &file);
   if (!ldb_ok(s)) {
     free(manifest);
+    ldb_version_edit_destroy(&new_db);
     return s;
   }
   {
@@ -182,9 +186,10 @@ static ldb_status db_new_db(ldb_db_impl* impl) {
     ldb_status cs = ldb_set_current_file(impl->env, impl->dbname, 1);
     ldb_status_set(&s, cs);
   } else {
-    ldb_env_remove_file(impl->env, manifest);
+    ldb_status_release(ldb_env_remove_file(impl->env, manifest));
   }
   free(manifest);
+  ldb_version_edit_destroy(&new_db);
   return s;
 }
 
@@ -222,7 +227,8 @@ static void remove_obsolete_files(ldb_db_impl* impl) {
 
   ldb_strings filenames;
   ldb_strings_init(&filenames);
-  ldb_env_get_children(impl->env, impl->dbname, &filenames);  // ignore errors
+  ldb_status_release(
+      ldb_env_get_children(impl->env, impl->dbname, &filenames));
   for (size_t i = 0; i < filenames.count; i++) {
     uint64_t number;
     int type;
@@ -253,7 +259,7 @@ static void remove_obsolete_files(ldb_db_impl* impl) {
         char* path =
             (char*)malloc(strlen(impl->dbname) + 1 + strlen(filenames.items[i]) + 1);
         sprintf(path, "%s/%s", impl->dbname, filenames.items[i]);
-        ldb_env_remove_file(impl->env, path);
+        ldb_status_release(ldb_env_remove_file(impl->env, path));
         free(path);
         if (type == LDB_K_TABLE_FILE) {
           ldb_table_cache_evict(impl->table_cache, number);
@@ -277,7 +283,7 @@ static ldb_status db_recover(ldb_db_impl* impl, ldb_version_edit* edit,
                              int* save_manifest) {
   // Ignore error from CreateDir since the creation of the DB is committed
   // only when the descriptor is created.
-  ldb_env_create_dir(impl->env, impl->dbname);
+  ldb_status_release(ldb_env_create_dir(impl->env, impl->dbname));
   assert(impl->db_lock == NULL);
   char* lock_name = ldb_lock_file_name(impl->dbname);
   ldb_status s = ldb_env_lock_file(impl->env, lock_name, &impl->db_lock);
@@ -491,6 +497,7 @@ static ldb_status recover_log_file(ldb_db_impl* impl, uint64_t log_number,
       }
     }
   }
+  ldb_log_reader_destroy(reader);
   ldb_write_batch_destroy(&batch);
   ldb_buffer_destroy(&scratch);
 
@@ -1034,7 +1041,8 @@ void ldb_db_impl_compact_range(ldb_db_impl* impl, const ldb_slice* begin,
     }
     ldb_mutex_unlock(&impl->mutex);
   }
-  ldb_db_impl_test_compact_mem_table(impl);  // TODO: Skip if no overlap
+  // TODO: Skip if no overlap
+  ldb_status_release(ldb_db_impl_test_compact_mem_table(impl));
   for (int level = 0; level < max_level_with_files; level++) {
     ldb_db_impl_test_compact_range(impl, level, begin, end);
   }
@@ -1676,13 +1684,14 @@ ldb_status ldb_destroy_db(const ldb_options* options, const char* dbname) {
   ldb_status result = ldb_env_get_children(env, dbname, &filenames);
   if (!ldb_ok(result)) {
     // Ignore error in case directory does not exist
+    ldb_status_destroy(&result);
     ldb_strings_destroy(&filenames);
     return ldb_status_ok();
   }
 
   ldb_file_lock* lock = NULL;
   char* lockname = ldb_lock_file_name(dbname);
-  result = ldb_env_lock_file(env, lockname, &lock);
+  ldb_status_set(&result, ldb_env_lock_file(env, lockname, &lock));
   if (ldb_ok(result)) {
     for (size_t i = 0; i < filenames.count; i++) {
       uint64_t number;
@@ -1701,9 +1710,10 @@ ldb_status ldb_destroy_db(const ldb_options* options, const char* dbname) {
         free(path);
       }
     }
-    ldb_env_unlock_file(env, lock);  // Ignore error; state is already gone
-    ldb_env_remove_file(env, lockname);
-    ldb_env_delete_dir(env, dbname);  // Ignore error in case of other files
+    // Ignore errors from here on: the state is already gone.
+    ldb_status_release(ldb_env_unlock_file(env, lock));
+    ldb_status_release(ldb_env_remove_file(env, lockname));
+    ldb_status_release(ldb_env_delete_dir(env, dbname));
   }
   free(lockname);
   ldb_strings_destroy(&filenames);

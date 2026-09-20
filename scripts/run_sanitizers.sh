@@ -22,7 +22,8 @@
 #
 # Env: OFFICIAL_DBS=<golden evidence dir> also verifies the official engine's
 #      files (produced by scripts/run_golden.sh); MODES, SAN, KEEP=1,
-#      SAN_DETECT_LEAKS=1 turns LeakSanitizer on (unsupported on Windows).
+#      SAN_DETECT_LEAKS=0/1 controls LeakSanitizer - on by default on a Linux
+#      host (glibc ASan has it), always off on Windows (its ASan has none).
 set -uo pipefail
 REPO=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 # Default compiler follows the host: only a *linux* host compiler is known to
@@ -127,14 +128,20 @@ export ASAN_OPTIONS=detect_leaks=0
 export UBSAN_OPTIONS=print_stacktrace=1
 # detect_leaks=1 is not merely ignored on Windows, it stops the process before
 # main(), so leaks cannot be checked with any local Windows toolchain. On Linux
-# glibc the same option is live, and SAN_DETECT_LEAKS=1 turns it on for every
-# consumer below - the leak leg itself is still tracked separately.
+# glibc the same option is live, and since the engine is leak-free there it is
+# the default here: SAN_DETECT_LEAKS=0 is the opt-out, not the opt-in.
 case "$TRIPLE" in
-  *linux*) printf 'leak check: SUPPORTED here (SAN_DETECT_LEAKS=1 to enable), probe says: %s\n' \
-    "$(ASAN_OPTIONS=detect_leaks=1 "$OBJDIR/kvdb_tests" nosuchtest 2>&1 | head -1)"
-    [[ "${SAN_DETECT_LEAKS:-0}" == 1 ]] && export ASAN_OPTIONS=detect_leaks=1 ;;
-  *) printf 'leak check: %s\n' "$(ASAN_OPTIONS=detect_leaks=1 "$OBJDIR/kvdb_tests" nosuchtest 2>&1 | head -1)" ;;
+  *linux*) LEAKS=${SAN_DETECT_LEAKS:-1} ;;
+  *) LEAKS=0 ;;
 esac
+if [[ "$LEAKS" == 1 ]]; then
+  export ASAN_OPTIONS=detect_leaks=1
+  LEAK_STATE='ON (SAN_DETECT_LEAKS=0 to disable)'
+else
+  LEAK_STATE='OFF'
+fi
+printf 'leak check: %s, probe says: %s\n' "$LEAK_STATE" \
+  "$(ASAN_OPTIONS=detect_leaks=1 "$OBJDIR/kvdb_tests" nosuchtest 2>&1 | head -1)"
 
 out=$("$OBJDIR/kvdb_tests" 2>&1); rc=$?
 printf '%s\n' "$out" > "$RUN/unit.log"

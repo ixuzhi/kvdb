@@ -131,7 +131,7 @@ ldb_status ldb_set_current_file(ldb_env* env, const char* dbname,
     free(cur);
   }
   if (!ldb_ok(s)) {
-    ldb_env_remove_file(env, tmp);
+    ldb_status_release(ldb_env_remove_file(env, tmp));
   }
   free(tmp);
   free(manifest);

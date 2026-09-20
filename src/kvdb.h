@@ -126,6 +126,10 @@ static inline void ldb_status_set(ldb_status* s, ldb_status v) {
   ldb_status_destroy(s);
   *s = v;
 }
+// Drops a status the caller deliberately ignores, freeing its message. The C++
+// reference can discard a Status by simply not naming it (RAII); a value type
+// cannot, so every "ignore errors" call site has to say so out loud.
+static inline void ldb_status_release(ldb_status s) { ldb_status_destroy(&s); }
 // Returns malloc'ed string; caller must free. Formats like leveldb:
 // "Corruption: msg", "NotFound: msg", "OK", "IO error: msg", ...
 char* ldb_status_to_string(ldb_status s);

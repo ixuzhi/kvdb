@@ -287,7 +287,10 @@ void leveldb_env_destroy(leveldb_env_t* env) { free(env); }
 char* leveldb_env_get_test_directory(leveldb_env_t* env) {
   ldb_buffer path;
   ldb_buffer_init(&path);
-  if (ldb_ok(ldb_env_get_test_directory(env->rep, &path))) {
+  ldb_status s = ldb_env_get_test_directory(env->rep, &path);
+  int ok = ldb_ok(s);
+  ldb_status_destroy(&s);
+  if (ok) {
     char* out = (char*)malloc(path.size + 1);
     memcpy(out, path.data ? path.data : "", path.size);
     out[path.size] = '\0';

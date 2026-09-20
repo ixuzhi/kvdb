@@ -95,7 +95,8 @@ static ldb_status convert_log_to_table(repairer* r, uint64_t log_number) {
   while (ldb_log_reader_read_record(reader, &record, &scratch)) {
     if (record.size < 12) continue;
     ldb_write_batch_set_contents(&batch, &record);
-    ldb_write_batch_insert_into(&batch, mem, NULL);
+    // Ignore error since the state is already gone
+    ldb_status_release(ldb_write_batch_insert_into(&batch, mem, NULL));
   }
   ldb_write_batch_destroy(&batch);
   ldb_buffer_destroy(&scratch);
@@ -182,7 +183,7 @@ ldb_status ldb_repair_db(const ldb_options* options, const char* dbname) {
         char* path =
             (char*)malloc(strlen(dbname) + strlen(filenames.items[i]) + 2);
         sprintf(path, "%s/%s", dbname, filenames.items[i]);
-        ldb_env_remove_file(env, path);
+        ldb_status_release(ldb_env_remove_file(env, path));
         free(path);
       }
     }
@@ -224,7 +225,7 @@ ldb_status ldb_repair_db(const ldb_options* options, const char* dbname) {
         r.tables[r.tables_count++] = stored;
       } else {
         char* tname = ldb_table_file_name(dbname, number);
-        ldb_env_remove_file(env, tname);
+        ldb_status_release(ldb_env_remove_file(env, tname));
         free(tname);
         ldb_status_destroy(&ts);
       }
@@ -273,7 +274,7 @@ ldb_status ldb_repair_db(const ldb_options* options, const char* dbname) {
       if (ldb_ok(s)) {
         s = ldb_set_current_file(env, dbname, manifest_number);
       } else {
-        ldb_env_remove_file(env, manifest);
+        ldb_status_release(ldb_env_remove_file(env, manifest));
       }
       free(manifest);
     }

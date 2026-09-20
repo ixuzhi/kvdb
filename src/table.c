@@ -372,8 +372,10 @@ static void ldb_table_read_meta(ldb_table* t, const ldb_footer* footer) {
     opt.verify_checksums = 1;
   }
   ldb_block_contents contents;
-  if (!ldb_ok(ldb_read_block(t->file, &opt, &footer->metaindex_handle,
-                             &contents))) {
+  ldb_status rs = ldb_read_block(t->file, &opt, &footer->metaindex_handle,
+                                 &contents);
+  if (!ldb_ok(rs)) {
+    ldb_status_destroy(&rs);
     return;  // meta info not needed for operation
   }
   ldb_block* meta = ldb_block_new(&contents);
@@ -413,7 +415,9 @@ static void ldb_table_read_filter(ldb_table* t, const ldb_slice* filter_handle_v
     opt.verify_checksums = 1;
   }
   ldb_block_contents block;
-  if (!ldb_ok(ldb_read_block(t->file, &opt, &filter_handle, &block))) {
+  ldb_status bs = ldb_read_block(t->file, &opt, &filter_handle, &block);
+  if (!ldb_ok(bs)) {
+    ldb_status_destroy(&bs);
     return;
   }
   if (block.alloc) {
@@ -520,7 +524,13 @@ ldb_status ldb_table_internal_get(const ldb_table* t,
     ldb_filter_block_reader* filter = t->filter;
     ldb_block_handle handle;
     ldb_slice hv = handle_value;
-    if (filter != NULL && ldb_ok(ldb_block_handle_decode(&handle, &hv)) &&
+    ldb_status ds = ldb_status_ok();
+    int have_handle = 0;
+    if (filter != NULL) {
+      ds = ldb_block_handle_decode(&handle, &hv);
+      have_handle = ldb_ok(ds);
+    }
+    if (have_handle &&
         !ldb_filter_block_reader_key_may_match(filter, handle.offset, k)) {
       // Not found
     } else {
@@ -534,6 +544,7 @@ ldb_status ldb_table_internal_get(const ldb_table* t,
       s = ldb_iter_status(block_iter);
       ldb_iterator_destroy(block_iter);
     }
+    ldb_status_destroy(&ds);
   }
   if (ldb_ok(s)) {
     ldb_status is = ldb_iter_status(iiter);

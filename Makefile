@@ -135,3 +135,9 @@ sanitize:
 # build_cygwin / build_linux ... one dedicated object tree each).
 matrix:
 	@bash scripts/check_all.sh --legs=unit
+
+# Independent verification (tools/verify): model fuzz, third-language
+# format probe with engine compare, snapshot isolation, crash torture,
+# corruption crash-freedom. Orthogonal to the ported suite by design.
+verify:
+	@bash tools/verify/verify_all.sh

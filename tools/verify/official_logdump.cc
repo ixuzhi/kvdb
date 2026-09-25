@@ -2,6 +2,7 @@
 // OFFICIAL log::Reader, so the independent JS probe can be checked against
 // the reference implementation itself.
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 #include "db/log_reader.h"
 #include "leveldb/env.h"

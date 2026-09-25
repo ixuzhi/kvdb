@@ -19,6 +19,9 @@
 //   crash_torture verify <db> <side>
 // Exit: verify 0 = prefix property holds; 3 = violated; 4 = open failed
 // (reported, not silently swallowed).
+#if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
+#define _POSIX_C_SOURCE 200809L   // fileno/fsync under -std=c11
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -120,7 +123,7 @@ static int do_verify(const char* dbpath, const char* sidepath, int drop_k) {
       printf("VERIFY bad key at %lld\n", count); bad = 1; break;
     }
     int evl = snprintf(expect, sizeof(expect), "v%08d.", n);
-    if (vl < evl || memcmp(v, expect, evl) != 0) {
+    if (vl < (size_t)evl || memcmp(v, expect, evl) != 0) {
       printf("VERIFY bad value for k%08d\n", n); bad = 1; break;
     }
     if (n > maxn) maxn = n;

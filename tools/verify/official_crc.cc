@@ -1,6 +1,7 @@
 // Arbitration: official crc32c on an arbitrary block extent (offset,size):
 // prints stored vs Mask(Value(type||data)).
 #include <cstdio>
+#include <cstdlib>
 #include <cstdint>
 #include <string>
 #include <vector>

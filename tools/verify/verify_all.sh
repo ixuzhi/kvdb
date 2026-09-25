@@ -46,6 +46,9 @@ make -C "$REPO" -s || { echo "engine build failed" >&2; exit 2; }
 [ -f "$LIB" ] || { echo "missing $LIB after build" >&2; exit 2; }
 LINK=""
 case "$CUR_TRIPLE" in *msys|*cygwin|*linux*|*darwin*) LINK="-lpthread" ;; esac
+TIMEOUT=${TIMEOUT:-900}
+TMO=""
+command -v timeout >/dev/null 2>&1 && TMO="timeout $TIMEOUT"   # a hung leg must fail, not block the suite forever
 for t in model_fuzz iterator_snapshot crash_torture reopen_probe mkfixture_kvdb; do
   $CC $CFLAGS "$REPO/tools/verify/$t.c" "$LIB" -o "$REPO/build/verify/$t.exe" $LINK 2>"$OUT/build-$t.log" || {
     echo "failed to build $t (see $OUT/build-$t.log)" >&2; tail -5 "$OUT/build-$t.log" >&2; exit 2
@@ -66,7 +69,7 @@ echo "== A: model fuzz ($MULT x 5 seeds x 10k steps)"
 a_ok=1
 for s in 1 2 3 4 5; do
   for m in $(seq 1 $MULT); do
-    "$REPO/build/verify/model_fuzz.exe" $((s*100+m)) 10000 "$REPO/build/verify/mf-db" >>"$OUT/model_fuzz.log" 2>&1 || a_ok=0
+    $TMO "$REPO/build/verify/model_fuzz.exe" $((s*100+m)) 10000 "$REPO/build/verify/mf-db" >>"$OUT/model_fuzz.log" 2>&1 || a_ok=0
   done
 done
 row model_fuzz "$([ $a_ok = 1 ] && echo PASS || echo FAIL)" "log: model_fuzz.log"
@@ -128,8 +131,8 @@ echo "== D: crash torture ($((12*MULT)) rounds)"
 d_ok=1; d_warn=0
 for i in $(seq 1 $((12*MULT))); do
   rm -rf "$REPO/build/verify/ct-db" "$REPO/build/verify/ct-side"
-  "$REPO/build/verify/crash_torture.exe" write "$REPO/build/verify/ct-db" "$REPO/build/verify/ct-side" 600 >/dev/null 2>&1
-  "$REPO/build/verify/crash_torture.exe" verify "$REPO/build/verify/ct-db" "$REPO/build/verify/ct-side" >>"$OUT/crash_torture.log" 2>&1
+  $TMO "$REPO/build/verify/crash_torture.exe" write "$REPO/build/verify/ct-db" "$REPO/build/verify/ct-side" 600 >/dev/null 2>&1
+  $TMO "$REPO/build/verify/crash_torture.exe" verify "$REPO/build/verify/ct-db" "$REPO/build/verify/ct-side" >>"$OUT/crash_torture.log" 2>&1
   rc=$?
   [ $rc -eq 0 ] || { [ $rc -eq 4 ] && d_warn=$((d_warn+1)) || d_ok=0; }
 done
@@ -156,18 +159,18 @@ if [ -n "${OFFDIR:-}" ] && [ "${OFF_TRIPLE:-}" = "$CUR_TRIPLE" ]; then
       || cmp_ok=0
   done
   for s in 1 2 3; do
-    "$OUT/model_fuzz-official.exe" $s 10000 "$OUT/cmp-db-official" >>"$OUT/comparative.txt" 2>&1 || cmp_ok=0
-    "$REPO/build/verify/model_fuzz.exe"          $s 10000 "$OUT/cmp-db-kvdb"     >>"$OUT/comparative.txt" 2>&1 || cmp_ok=0
+    $TMO "$OUT/model_fuzz-official.exe" $s 10000 "$OUT/cmp-db-official" >>"$OUT/comparative.txt" 2>&1 || cmp_ok=0
+    $TMO "$REPO/build/verify/model_fuzz.exe"          $s 10000 "$OUT/cmp-db-kvdb"     >>"$OUT/comparative.txt" 2>&1 || cmp_ok=0
   done
   for s in 1 2; do
-    "$OUT/iterator_snapshot-official.exe" $s 1500 "$OUT/cmp-is-official" >>"$OUT/comparative.txt" 2>&1 || cmp_ok=0
-    "$REPO/build/verify/iterator_snapshot.exe"          $s 1500 "$OUT/cmp-is-kvdb"     >>"$OUT/comparative.txt" 2>&1 || cmp_ok=0
+    $TMO "$OUT/iterator_snapshot-official.exe" $s 1500 "$OUT/cmp-is-official" >>"$OUT/comparative.txt" 2>&1 || cmp_ok=0
+    $TMO "$REPO/build/verify/iterator_snapshot.exe"          $s 1500 "$OUT/cmp-is-kvdb"     >>"$OUT/comparative.txt" 2>&1 || cmp_ok=0
   done
   rm -rf "$OUT/cmp-ct-official" "$OUT/cmp-ct-kvdb"
-  "$OUT/crash_torture-official.exe" write "$OUT/cmp-ct-official" "$OUT/cmp-ct-official.side" 300 >/dev/null 2>&1; [ -s "$OUT/cmp-ct-official.side" ] || cmp_ok=0   # the writer self-terminates by design; require a non-empty side log
-  "$OUT/crash_torture-official.exe" verify "$OUT/cmp-ct-official" "$OUT/cmp-ct-official.side" >>"$OUT/comparative.txt" 2>&1 || cmp_ok=0
-  "$REPO/build/verify/crash_torture.exe"          write "$OUT/cmp-ct-kvdb" "$OUT/cmp-ct-kvdb.side" 300 >/dev/null 2>&1
-  "$REPO/build/verify/crash_torture.exe"          verify "$OUT/cmp-ct-kvdb" "$OUT/cmp-ct-kvdb.side" >>"$OUT/comparative.txt" 2>&1 || cmp_ok=0
+  $TMO "$OUT/crash_torture-official.exe" write "$OUT/cmp-ct-official" "$OUT/cmp-ct-official.side" 300 >/dev/null 2>&1; [ -s "$OUT/cmp-ct-official.side" ] || cmp_ok=0   # the writer self-terminates by design; require a non-empty side log
+  $TMO "$OUT/crash_torture-official.exe" verify "$OUT/cmp-ct-official" "$OUT/cmp-ct-official.side" >>"$OUT/comparative.txt" 2>&1 || cmp_ok=0
+  $TMO "$REPO/build/verify/crash_torture.exe"          write "$OUT/cmp-ct-kvdb" "$OUT/cmp-ct-kvdb.side" 300 >/dev/null 2>&1
+  $TMO "$REPO/build/verify/crash_torture.exe"          verify "$OUT/cmp-ct-kvdb" "$OUT/cmp-ct-kvdb.side" >>"$OUT/comparative.txt" 2>&1 || cmp_ok=0
   row comparative "$([ $cmp_ok = 1 ] && echo PASS || echo FAIL)" "same seeds through both engines; log: comparative.txt"
 else
   echo "SKIP comparative: official archive absent or from another namespace (run from the matching shell)" | tee -a "$OUT/summary.txt"

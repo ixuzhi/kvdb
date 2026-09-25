@@ -602,8 +602,148 @@ TEST(db, SequenceNumberRecovery) {
   dbt_teardown(&t);
 }
 
-TEST(db, MultiThreadedWrites) {
-  // Single-threaded stand-in: many sequential writes + reads
+// ------------------------------------------------------------------ multithreaded
+// Port of leveldb db_test MultiThreaded: N threads share one DB handle,
+// randomly writing values of the form "<key>.<writer>.<counter>" or
+// reading and verifying that the encoded counter never exceeds the
+// writer's published progress. Exercises writer-queue / memtable-flush /
+// background-compaction / Get interleavings that single-threaded tests
+// cannot reach. Keep the old sequential coverage as DBWriteHeavy.
+#define MT_NUM_THREADS 4
+#define MT_NUM_KEYS 1000
+#define MT_OPS_PER_THREAD 2000
+
+typedef struct mt_state {
+  db_tester* t;
+  ldb_atomic_int counter[MT_NUM_THREADS];
+  ldb_atomic_int thread_done[MT_NUM_THREADS];
+} mt_state;
+
+typedef struct mt_thread {
+  mt_state* state;
+  int id;
+} mt_thread;
+
+static uint64_t mt_rnd_next(uint64_t* seed) {
+  // MINSTD, same generator family as leveldb's Random.
+  *seed = (*seed * 16807ull) % 2147483647ull;
+  return *seed;
+}
+
+static void mt_thread_body(void* arg) {
+  mt_thread* th = (mt_thread*)arg;
+  mt_state* st = th->state;
+  db_tester* t = st->t;
+  uint64_t seed = 1000 + (uint64_t)th->id;
+  int counter = 0;
+  for (int op = 0; op < MT_OPS_PER_THREAD; op++) {
+    // Publish progress before the next operation, like leveldb.
+    ldb_atomic_store(&st->counter[th->id], counter);
+
+    int key = (int)(mt_rnd_next(&seed) % MT_NUM_KEYS);
+    char keybuf[24];
+    snprintf(keybuf, sizeof(keybuf), "%016d", key);
+    ldb_slice ks = ldb_slice_str(keybuf);
+
+    if (mt_rnd_next(&seed) % 2 == 0) {
+      // Write values of the form <key, my id, counter>; the padding
+      // forces memtable flushes and compactions during the test.
+      char val[1100];
+      int n = snprintf(val, sizeof(val), "%d.%d.%-1000d", key, th->id,
+                       counter);
+      ldb_write_options wo;
+      ldb_write_options_init(&wo);
+      ldb_write_batch b;
+      ldb_write_batch_init(&b);
+      ldb_slice vs = ldb_slice_make(val, (size_t)n);
+      ldb_write_batch_put(&b, &ks, &vs);
+      ldb_status s = ldb_db_impl_write(t->db, &wo, &b);
+      if (!ldb_ok(s)) {
+        char* msg = ldb_status_to_string(s);
+        ldb_test_fail(__FILE__, __LINE__, "thread %d put failed: %s", th->id,
+                      msg);
+      }
+      ldb_write_batch_destroy(&b);
+    } else {
+      ldb_read_options ro;
+      ldb_read_options_init(&ro);
+      ldb_buffer value;
+      ldb_buffer_init(&value);
+      ldb_status s = ldb_db_impl_get(t->db, &ro, &ks, &value);
+      if (ldb_ok(s)) {
+        // value may not be NUL-terminated; copy before sscanf.
+        char* tmp = (char*)malloc(value.size + 1);
+        memcpy(tmp, value.data ? value.data : "", value.size);
+        tmp[value.size] = '\0';
+        int k, w, c;
+        if (sscanf(tmp, "%d.%d.%d", &k, &w, &c) != 3 || k != key || w < 0 ||
+            w >= MT_NUM_THREADS ||
+            c > ldb_atomic_load(&st->counter[w])) {
+          ldb_test_fail(__FILE__, __LINE__,
+                        "thread %d: bad value '%s' for key %d", th->id, tmp,
+                        key);
+        }
+        free(tmp);
+      } else if (s.code == LDB_NOTFOUND) {
+        // Key has not yet been written.
+      } else {
+        char* msg = ldb_status_to_string(s);
+        ldb_test_fail(__FILE__, __LINE__, "thread %d get failed: %s", th->id,
+                      msg);
+      }
+      ldb_status_destroy(&s);
+      ldb_buffer_destroy(&value);
+    }
+    counter++;
+  }
+  ldb_atomic_store(&st->thread_done[th->id], 1);
+}
+
+TEST(db, MultiThreaded) {
+  db_tester t;
+  dbt_init_options(&t);
+  ldb_test_make_db_path("db_test_mt", t.path, sizeof(t.path));
+  dbt_reopen(&t);
+
+  mt_state st;
+  st.t = &t;
+  for (int i = 0; i < MT_NUM_THREADS; i++) {
+    ldb_atomic_store(&st.counter[i], 0);
+    ldb_atomic_store(&st.thread_done[i], 0);
+  }
+  mt_thread th[MT_NUM_THREADS];
+  for (int i = 0; i < MT_NUM_THREADS; i++) {
+    th[i].state = &st;
+    th[i].id = i;
+    ldb_start_thread(mt_thread_body, &th[i]);
+  }
+
+  // Wait for all workers; they are iteration-bounded so this terminates,
+  // but the wait is bounded too so a lost wakeup fails instead of hanging.
+  int done = 0;
+  uint64_t deadline_micros =
+      ldb_env_now_micros(t.options.env) + 120 * 1000000ull;
+  while (done < MT_NUM_THREADS) {
+    done = 0;
+    for (int i = 0; i < MT_NUM_THREADS; i++) {
+      done += ldb_atomic_load(&st.thread_done[i]);
+    }
+    if (done < MT_NUM_THREADS) {
+      if (ldb_env_now_micros(t.options.env) > deadline_micros) {
+        ldb_test_fail(__FILE__, __LINE__,
+                      "MT workers did not finish within 120s (done=%d/%d)",
+                      done, MT_NUM_THREADS);
+      }
+      ldb_env_sleep_for_microseconds(t.options.env, 20000);
+    }
+  }
+
+  dbt_teardown(&t);
+}
+
+TEST(db, WriteHeavySequential) {
+  // Single-threaded stand-in for sustained write coverage: many sequential
+  // writes + reads across multiple "rounds" (overwrite pattern).
   db_tester t;
   dbt_init_options(&t);
   ldb_test_make_db_path("db_test_multi", t.path, sizeof(t.path));
@@ -832,4 +972,70 @@ TEST(db, EmptySlicesWithFilesInHigherLevels) {
   CHECK(h2 != NULL);
   c->release(c, h2);
   c->destroy(c);
+}
+
+// ------------------------------------------------------------------ large values
+// Values > the 4KB write-batch heap-buffer threshold and > the 4KB block
+// size; key > 4096 exercises the heap path in batch replay.
+TEST(db, LargeValueRoundtrip) {
+  db_tester t;
+  dbt_init_options(&t);
+  ldb_test_make_db_path("db_test_large", t.path, sizeof(t.path));
+  dbt_reopen(&t);
+
+  const size_t kBigKey = 8 * 1024;      // > 4096: heap path
+  const size_t kBigValue = 100 * 1024;  // > block size and > write buffer
+  char* kbuf = (char*)malloc(kBigKey);
+  char* vbuf = (char*)malloc(kBigValue);
+  for (size_t i = 0; i < kBigKey; i++) kbuf[i] = (char)(i * 31u + 1);
+  for (size_t i = 0; i < kBigValue; i++) vbuf[i] = (char)(i * 31u + 2);
+  ldb_slice key = ldb_slice_make(kbuf, kBigKey);
+  ldb_slice val = ldb_slice_make(vbuf, kBigValue);
+
+  ldb_write_options wo;
+  ldb_write_options_init(&wo);
+  ldb_write_batch b;
+  ldb_write_batch_init(&b);
+  ldb_write_batch_put(&b, &key, &val);
+  CHECK_STATUS_OK(ldb_db_impl_write(t.db, &wo, &b));
+  ldb_write_batch_destroy(&b);
+
+  ldb_read_options ro;
+  ldb_read_options_init(&ro);
+  ldb_buffer got;
+  ldb_buffer_init(&got);
+  CHECK_STATUS_OK(ldb_db_impl_get(t.db, &ro, &key, &got));
+  CHECK_EQ((long long)kBigValue, (long long)got.size);
+  CHECK_EQ(0, memcmp(got.data, vbuf, kBigValue));
+  ldb_buffer_destroy(&got);
+
+  // Visible through an iterator with identical content.
+  ldb_iterator* it = ldb_db_impl_new_iterator(t.db, &ro);
+  ldb_iter_seek_to_first(it);
+  CHECK_EQ(1, ldb_iter_valid(it));
+  ldb_slice iter_key = ldb_iter_key(it);
+  CHECK_EQ(1, ldb_slice_equals(&key, &iter_key));
+  CHECK_EQ((long long)kBigValue, (long long)ldb_iter_value(it).size);
+  CHECK_EQ(0, memcmp(ldb_iter_value(it).data, vbuf, kBigValue));
+  CHECK_STATUS_OK(ldb_iter_status(it));
+  ldb_iterator_destroy(it);
+
+  // Survives reopen (WAL replay of a large batch) and compaction.
+  dbt_reopen(&t);
+  ldb_buffer_init(&got);
+  CHECK_STATUS_OK(ldb_db_impl_get(t.db, &ro, &key, &got));
+  CHECK_EQ((long long)kBigValue, (long long)got.size);
+  CHECK_EQ(0, memcmp(got.data, vbuf, kBigValue));
+  ldb_buffer_destroy(&got);
+
+  ldb_db_impl_compact_range(t.db, NULL, NULL);
+  ldb_buffer_init(&got);
+  CHECK_STATUS_OK(ldb_db_impl_get(t.db, &ro, &key, &got));
+  CHECK_EQ((long long)kBigValue, (long long)got.size);
+  CHECK_EQ(0, memcmp(got.data, vbuf, kBigValue));
+  ldb_buffer_destroy(&got);
+
+  free(kbuf);
+  free(vbuf);
+  dbt_teardown(&t);
 }

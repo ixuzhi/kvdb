@@ -194,3 +194,143 @@ static const char* std_string(size_t n) {
   buf[n] = '\0';
   return buf;
 }
+
+// ------------------------------------------------- initial offset reading
+// (port of leveldb log_test WriteInitialOffsetLog / CheckInitialOffsetRecord)
+static const size_t lt_initial_offset_sizes[] = {
+    10000,                        // Two sizable records in first block
+    10000,
+    2 * LDB_LOG_BLOCK_SIZE - 1000,  // Span three blocks
+    1,
+    13716,                          // Consume all but two bytes of block 3.
+    LDB_LOG_BLOCK_SIZE - 7,         // Consume the entirety of block 4.
+};
+
+static const uint64_t lt_initial_offset_last_offsets[] = {
+    0,
+    7 + 10000,
+    2 * (7 + 10000),
+    2 * (7 + 10000) + (2 * LDB_LOG_BLOCK_SIZE - 1000) + 3 * 7,
+    2 * (7 + 10000) + (2 * LDB_LOG_BLOCK_SIZE - 1000) + 3 * 7 + 7 + 1,
+    3 * LDB_LOG_BLOCK_SIZE,
+};
+
+#define LT_NUM_INITIAL_OFFSET_RECORDS \
+  (sizeof(lt_initial_offset_sizes) / sizeof(lt_initial_offset_sizes[0]))
+
+static void lt_write_initial_offset_log(log_test_env* t) {
+  for (size_t i = 0; i < LT_NUM_INITIAL_OFFSET_RECORDS; i++) {
+    size_t n = lt_initial_offset_sizes[i];
+    char* buf = (char*)malloc(n);
+    memset(buf, 'a' + (int)i, n);
+    ldb_slice s = ldb_slice_make(buf, n);
+    CHECK_STATUS_OK(ldb_log_writer_add_record(t->writer, &s));
+    free(buf);
+  }
+}
+
+static void lt_check_initial_offset_record(uint64_t initial_offset,
+                                           int expected_record_offset) {
+  log_test_env t;
+  lt_open_writer(&t);
+  lt_write_initial_offset_log(&t);
+  CHECK_STATUS_OK(ldb_env_new_sequential_file(t.env, t.wname, &t.reader_src));
+  t.reader = ldb_log_reader_new(t.reader_src, NULL, NULL, 1, initial_offset);
+
+  CHECK(expected_record_offset >= 0 &&
+        (size_t)expected_record_offset < LT_NUM_INITIAL_OFFSET_RECORDS);
+  // scratch must outlive the checks below: fragmented records alias it.
+  ldb_buffer scratch;
+  ldb_buffer_init(&scratch);
+  for (int i = expected_record_offset; i < (int)LT_NUM_INITIAL_OFFSET_RECORDS;
+       i++) {
+    ldb_slice record;
+    if (!ldb_log_reader_read_record(t.reader, &record, &scratch)) {
+      ldb_buffer_destroy(&scratch);
+      ldb_test_fail(__FILE__, __LINE__, "offset %llu: record %d: EOF",
+                    (unsigned long long)initial_offset, i);
+    }
+    if ((size_t)record.size != lt_initial_offset_sizes[i]) {
+      ldb_buffer_destroy(&scratch);
+      ldb_test_fail(__FILE__, __LINE__, "offset %llu: record %d: size %zu != %zu",
+                    (unsigned long long)initial_offset, i, record.size,
+                    lt_initial_offset_sizes[i]);
+    }
+    if (ldb_log_reader_last_record_offset(t.reader) !=
+        lt_initial_offset_last_offsets[i]) {
+      ldb_buffer_destroy(&scratch);
+      ldb_test_fail(__FILE__, __LINE__,
+                    "offset %llu: record %d: last_record_offset %llu != %llu",
+                    (unsigned long long)initial_offset, i,
+                    (unsigned long long)ldb_log_reader_last_record_offset(t.reader),
+                    (unsigned long long)lt_initial_offset_last_offsets[i]);
+    }
+    if (record.data[0] != 'a' + i) {
+      ldb_buffer_destroy(&scratch);
+      ldb_test_fail(__FILE__, __LINE__,
+                    "offset %llu: record %d: first byte '%c' != '%c'",
+                    (unsigned long long)initial_offset, i, record.data[0],
+                    (char)('a' + i));
+    }
+  }
+  ldb_buffer_destroy(&scratch);
+  lt_teardown(&t);
+}
+
+static void lt_check_offset_past_end(uint64_t offset_past_end) {
+  log_test_env t;
+  lt_open_writer(&t);
+  lt_write_initial_offset_log(&t);
+  // Ask the env for the file size (covers fragment headers and end-of-block
+  // zero padding exactly).
+  uint64_t written = 0;
+  CHECK_STATUS_OK(ldb_env_get_file_size(t.env, t.wname, &written));
+  CHECK_STATUS_OK(ldb_env_new_sequential_file(t.env, t.wname, &t.reader_src));
+  t.reader = ldb_log_reader_new(t.reader_src, NULL, NULL, 1,
+                                written + offset_past_end);
+  ldb_slice record;
+  ldb_buffer scratch;
+  ldb_buffer_init(&scratch);
+  CHECK_EQ(0, ldb_log_reader_read_record(t.reader, &record, &scratch));
+  ldb_buffer_destroy(&scratch);
+  lt_teardown(&t);
+}
+
+TEST(log, ReadStart) { lt_check_initial_offset_record(0, 0); }
+
+TEST(log, ReadSecondOneOff) { lt_check_initial_offset_record(1, 1); }
+
+TEST(log, ReadSecondTenThousand) { lt_check_initial_offset_record(10000, 1); }
+
+TEST(log, ReadSecondStart) { lt_check_initial_offset_record(10007, 1); }
+
+TEST(log, ReadThirdOneOff) { lt_check_initial_offset_record(10008, 2); }
+
+TEST(log, ReadThirdStart) { lt_check_initial_offset_record(20014, 2); }
+
+TEST(log, ReadFourthOneOff) { lt_check_initial_offset_record(20015, 3); }
+
+TEST(log, ReadFourthFirstBlockTrailer) {
+  lt_check_initial_offset_record(LDB_LOG_BLOCK_SIZE - 4, 3);
+}
+
+TEST(log, ReadFourthMiddleBlock) {
+  lt_check_initial_offset_record(LDB_LOG_BLOCK_SIZE + 1, 3);
+}
+
+TEST(log, ReadFourthLastBlock) {
+  lt_check_initial_offset_record(2 * LDB_LOG_BLOCK_SIZE + 1, 3);
+}
+
+TEST(log, ReadFourthStart) {
+  lt_check_initial_offset_record(
+      2 * (7 + 1000) + (2 * LDB_LOG_BLOCK_SIZE - 1000) + 3 * 7, 3);
+}
+
+TEST(log, ReadInitialOffsetIntoBlockPadding) {
+  lt_check_initial_offset_record(3 * LDB_LOG_BLOCK_SIZE - 3, 5);
+}
+
+TEST(log, ReadEnd) { lt_check_offset_past_end(0); }
+
+TEST(log, ReadPastEnd) { lt_check_offset_past_end(5); }

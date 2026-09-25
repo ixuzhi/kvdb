@@ -708,6 +708,8 @@ void ldb_log_reader_destroy(ldb_log_reader* r);
 // on success; 0 at EOF.
 int ldb_log_reader_read_record(ldb_log_reader* r, ldb_slice* record,
                                ldb_buffer* scratch);
+// Offset of the beginning of the last record returned by read_record.
+uint64_t ldb_log_reader_last_record_offset(const ldb_log_reader* r);
 
 // ------------------------------------------------------------------ write batch
 typedef struct ldb_write_batch {

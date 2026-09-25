@@ -74,7 +74,7 @@ endif
 endif
 endif
 
-.PHONY: all clean test
+.PHONY: all clean test doctor check golden interop cross-backend sanitize matrix
 
 all: $(LIB) $(TESTBIN)
 
@@ -108,3 +108,30 @@ test: $(TESTBIN)
 clean:
 	rm -f $(LIB_OBJS) $(TEST_OBJS) $(LIB) $(TESTBIN) $(TESTBIN).exe $(OBJDIR)/.target
 	-rmdir $(OBJDIR)/tests $(OBJDIR) 2>/dev/null
+
+# ---- verification entry points (thin wrappers; the logic lives in scripts/)
+# Run these from Git Bash / MSYS2 / Cygwin / Linux, where `bash` exists; the
+# w64devkit bare shell has no bash. `make doctor` prints which environment
+# runs which leg and what is missing (scripts/kvdb_doctor.sh).
+doctor:
+	@bash scripts/kvdb_doctor.sh
+
+check:
+	@bash scripts/check_all.sh
+
+golden:
+	@bash scripts/run_golden.sh
+
+interop:
+	@RUN_C_TEST=1 bash scripts/run_interop.sh
+
+cross-backend:
+	@bash scripts/run_cross_backend.sh
+
+sanitize:
+	@bash scripts/run_sanitizers.sh
+
+# Unit leg on every available environment (build_mingw / build_msys /
+# build_cygwin / build_linux ... one dedicated object tree each).
+matrix:
+	@bash scripts/check_all.sh --legs=unit

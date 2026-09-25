@@ -107,6 +107,7 @@ typedef struct ldb_log_reader {
 
   ldb_buffer buffer;         // scratch for the current block
   int eof;
+  int resyncing;  // set when initial_offset>0; silently skip MIDDLE/LAST
   uint64_t last_record_offset;
   uint64_t end_of_buffer_offset;
   size_t pos;  // parse position within buffer (no memmove consumption)
@@ -122,6 +123,7 @@ ldb_log_reader* ldb_log_reader_new(ldb_seq_file* file, void* reporter,
   r->checksum = checksum;
   r->initial_offset = initial_offset;
   r->eof = 0;
+  r->resyncing = (initial_offset > 0);
   r->last_record_offset = 0;
   r->end_of_buffer_offset = 0;
   r->pos = 0;
@@ -138,7 +140,10 @@ void ldb_log_reader_destroy(ldb_log_reader* r) {
 
 static void report_drop(ldb_log_reader* r, uint64_t bytes,
                         const ldb_status* reason) {
-  if (r->corruption_cb != NULL && bytes > 0) {
+  // Like leveldb: only report corruption at or after initial_offset.
+  if (r->corruption_cb != NULL && bytes > 0 &&
+      r->end_of_buffer_offset - (r->buffer.size - r->pos) - bytes >=
+          r->initial_offset) {
     r->corruption_cb(r->reporter, bytes, ldb_status_copy(*reason));
   }
 }
@@ -150,7 +155,7 @@ static void report_corruption(ldb_log_reader* r, uint64_t bytes,
   ldb_status_destroy(&s);
 }
 
-static uint64_t skip_to_initial_block(ldb_log_reader* r) {
+static int skip_to_initial_block(ldb_log_reader* r) {
   const uint64_t target = r->initial_offset;
   const uint64_t block_start_location =
       (target / LDB_LOG_BLOCK_SIZE) * LDB_LOG_BLOCK_SIZE;
@@ -161,7 +166,18 @@ static uint64_t skip_to_initial_block(ldb_log_reader* r) {
     block_start_location_ret += LDB_LOG_BLOCK_SIZE;
   }
   r->end_of_buffer_offset = block_start_location_ret;
-  return block_start_location_ret;
+
+  // Seek the underlying file to the computed block start; the sequential
+  // reads below must start there for the offset bookkeeping to line up.
+  if (block_start_location_ret > 0) {
+    ldb_status s = r->file->m->skip(r->file, block_start_location_ret);
+    if (!ldb_ok(s)) {
+      report_drop(r, block_start_location_ret, &s);
+      ldb_status_destroy(&s);
+      return 0;
+    }
+  }
+  return 1;
 }
 
 // Reads the next physical record; returns its type, LOG_EOF, or LOG_BAD_RECORD.
@@ -225,7 +241,10 @@ static int read_physical_record(ldb_log_reader* r, ldb_slice* result,
 
     // Skip zero length records without checking any CRCs
     if (type == LDB_LOG_ZERO_TYPE && length == 0) {
-      r->pos += LDB_LOG_HEADER_SIZE;
+      // Such records are produced by mmap-based writing code that
+      // preallocates file regions; drop the rest of the block.
+      ldb_buffer_clear(&r->buffer);
+      r->pos = 0;
       return LOG_BAD_RECORD;
     }
 
@@ -263,20 +282,41 @@ static int read_physical_record(ldb_log_reader* r, ldb_slice* result,
 int ldb_log_reader_read_record(ldb_log_reader* r, ldb_slice* record,
                                ldb_buffer* scratch) {
   if (r->last_record_offset < r->initial_offset) {
-    size_t dummy;
-    skip_to_initial_block(r);
-    // Read until we hit the first record past initial_offset; handled below
-    // by the per-record offset check in read_physical_record.
-    (void)dummy;
+    if (!skip_to_initial_block(r)) {
+      return 0;
+    }
   }
 
+  ldb_buffer_clear(scratch);
   *record = ldb_slice_make(NULL, 0);
   int in_fragmented_record = 0;
+  // File offset of the logical record currently being assembled.
+  uint64_t prospective_record_offset = 0;
 
   while (1) {
-    ldb_slice fragment;
+    // Empty by default: read_physical_record leaves it untouched on the
+    // bad-length / CRC / EOF paths (official default-constructs its Slice).
+    ldb_slice fragment = ldb_slice_make(NULL, 0);
     size_t drop_size;
     int type = read_physical_record(r, &fragment, &drop_size);
+    // Offset of the physical record just returned. r->pos has already
+    // advanced past its header+payload, so the remaining byte count
+    // (buffer.size - pos) recovers the record's start position.
+    uint64_t physical_record_offset =
+        r->end_of_buffer_offset - (r->buffer.size - r->pos) -
+        LDB_LOG_HEADER_SIZE - fragment.size;
+
+    if (r->resyncing) {
+      if (type == LDB_LOG_MIDDLE_TYPE) {
+        continue;
+      } else if (type == LDB_LOG_LAST_TYPE) {
+        r->resyncing = 0;
+        continue;
+      } else {
+        r->resyncing = 0;
+      }
+    }
+
     switch (type) {
       case LDB_LOG_FULL_TYPE:
         if (in_fragmented_record) {
@@ -289,8 +329,10 @@ int ldb_log_reader_read_record(ldb_log_reader* r, ldb_slice* record,
                               "partial record without end(1)");
           }
         }
+        prospective_record_offset = physical_record_offset;
+        ldb_buffer_clear(scratch);
         *record = fragment;
-        r->last_record_offset = r->end_of_buffer_offset - r->buffer.size;
+        r->last_record_offset = prospective_record_offset;
         return 1;
 
       case LDB_LOG_FIRST_TYPE:
@@ -300,6 +342,7 @@ int ldb_log_reader_read_record(ldb_log_reader* r, ldb_slice* record,
                               "partial record without end(2)");
           }
         }
+        prospective_record_offset = physical_record_offset;
         ldb_buffer_clear(scratch);
         ldb_buffer_append_slice(scratch, &fragment);
         in_fragmented_record = 1;
@@ -321,7 +364,7 @@ int ldb_log_reader_read_record(ldb_log_reader* r, ldb_slice* record,
         } else {
           ldb_buffer_append_slice(scratch, &fragment);
           *record = ldb_slice_make(scratch->data, scratch->size);
-          r->last_record_offset = r->end_of_buffer_offset - r->buffer.size;
+          r->last_record_offset = prospective_record_offset;
           return 1;
         }
         break;
@@ -337,11 +380,9 @@ int ldb_log_reader_read_record(ldb_log_reader* r, ldb_slice* record,
 
       case LOG_EOF:
         if (in_fragmented_record) {
-          // This can be caused by the writer dying immediately after
-          // writing a physical record that contained a header but not
-          // the full payload of a logical record.
-          report_corruption(r, scratch->size,
-                            "truncated record at end of file");
+          // The writer died immediately after writing a physical record
+          // but before completing the next; ignore the logical record
+          // without reporting corruption (matches leveldb).
           ldb_buffer_clear(scratch);
         }
         return 0;
@@ -354,4 +395,8 @@ int ldb_log_reader_read_record(ldb_log_reader* r, ldb_slice* record,
         break;
     }
   }
+}
+
+uint64_t ldb_log_reader_last_record_offset(const ldb_log_reader* r) {
+  return r->last_record_offset;
 }

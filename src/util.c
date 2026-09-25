@@ -469,6 +469,14 @@ uint32_t ldb_crc32c_value(const char* data, size_t n) {
 uint32_t ldb_hash(const char* data, size_t n, uint32_t seed) {
   const uint32_t m = 0xc6a4a793u;
   const uint32_t r = 24;
+  // Empty slices are {NULL, 0} in this C API; the pointer arithmetic below
+  // would then be UB (UBSan: "applying non-zero offset 4 to null pointer").
+  // Official Hash() never sees a null base because std::string::data() is
+  // never null, so substitute "" — the results stay bit-identical.
+  if (data == NULL) {
+    data = "";
+    n = 0;
+  }
   const char* limit = data + n;
   uint32_t h = (uint32_t)(seed ^ (uint32_t)(n * m));
   while (data + 4 <= limit) {
